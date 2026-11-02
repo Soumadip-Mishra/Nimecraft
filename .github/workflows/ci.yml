@@ -1,0 +1,74 @@
+name: CI
+
+on:
+  push:
+  pull_request:
+
+jobs:
+  linux:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+
+      - name: Install build tools and raylib's X11/GL dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y cmake g++ make python3 xvfb \
+            libgl-dev libx11-dev libxrandr-dev libxinerama-dev libxcursor-dev libxi-dev
+
+      - name: Let ThreadSanitizer map its shadow memory
+        # Runner kernels randomize mmap with more bits than older TSan runtimes accept.
+        run: sudo sysctl vm.mmap_rnd_bits=28
+
+      - name: Tests (dev preset, ASan + UBSan)
+        run: make test
+
+      - name: Tests (tsan preset)
+        run: make tsan
+
+      - name: Coverage Gate (coverage preset)
+        run: make coverage
+
+      - name: Release build
+        run: make release
+
+      - uses: actions/upload-artifact@v7
+        with:
+          name: nimecraft-linux
+          path: build/release/nimecraft
+
+  windows-msvc:
+    # The msvc preset targets Visual Studio 2022; windows-latest now ships only Visual Studio 2026.
+    runs-on: windows-2022
+    steps:
+      - uses: actions/checkout@v7
+
+      - name: Configure
+        run: cmake --preset msvc
+
+      - name: Build
+        run: cmake --build --preset msvc --config Release
+
+      - name: Tests
+        run: build\msvc\Release\nimecraft_tests.exe
+
+      - uses: actions/upload-artifact@v7
+        with:
+          name: nimecraft-windows
+          path: build/msvc/Release/nimecraft.exe
+
+  windows-cross:
+    runs-on: ubuntu-latest
+    env:
+      # A fresh Wine prefix would otherwise try to install Mono and Gecko on first run.
+      WINEDLLOVERRIDES: "mscoree,mshtml="
+    steps:
+      - uses: actions/checkout@v7
+
+      - name: Install the MinGW-w64 POSIX-threads compiler and Wine
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y cmake make g++-mingw-w64-x86-64-posix wine
+
+      - name: Cross-build and run the tests under Wine
+        run: make win

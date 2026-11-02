@@ -1,0 +1,379 @@
+// Tests for src/mesher.*: padded snapshots and face-culled chunk meshes.
+#include "block.hpp"
+#include "chunk.hpp"
+#include "coords.hpp"
+#include "mesher.hpp"
+#include "test.hpp"
+#include "world.hpp"
+
+#include <cstddef>
+#include <cstdint>
+#include <thread>
+#include <vector>
+
+namespace {
+
+// All-AIR columns (-1..1, -1..1), as the task's test setup describes.
+World air_world() {
+    World w(1);
+    for (int cx = -1; cx <= 1; ++cx)
+        for (int cz = -1; cz <= 1; ++cz) w.insert_column(ColumnPos{cx, cz}, Column{});
+    return w;
+}
+
+MeshData mesh_of(const World& w, ChunkPos p) {
+    return build_mesh(snapshot(w, p), p);
+}
+
+struct V3 {
+    float x, y, z;
+};
+
+V3 pos_at(const MeshData& m, std::size_t i) {
+    return V3{m.positions[i * 3], m.positions[i * 3 + 1], m.positions[i * 3 + 2]};
+}
+
+V3 normal_at(const MeshData& m, std::size_t i) {
+    return V3{m.normals[i * 3], m.normals[i * 3 + 1], m.normals[i * 3 + 2]};
+}
+
+bool indices_in_range(const MeshData& m) {
+    for (uint16_t i : m.indices)
+        if (i >= m.vertex_count()) return false;
+    return true;
+}
+
+// Face of a unit normal, by the Face enum order PX, NX, PY, NY, PZ, NZ.
+int face_of(V3 n) {
+    if (n.x > 0.5f) return PX;
+    if (n.x < -0.5f) return NX;
+    if (n.y > 0.5f) return PY;
+    if (n.y < -0.5f) return NY;
+    if (n.z > 0.5f) return PZ;
+    return NZ;
+}
+
+}  // namespace
+
+TEST(test_mesh_single_block) {
+    World w = air_world();
+    w.set(1, 70, 1, blk::STONE);
+    const MeshData m = mesh_of(w, ChunkPos{0, 4, 0});
+    CHECK(m.vertex_count() == 24);
+    CHECK(m.indices.size() == 36);
+    CHECK(m.positions.size() == 72);
+    CHECK(m.texcoords.size() == 48);
+    CHECK(m.normals.size() == 72);
+    CHECK(m.colors.size() == 96);
+}
+
+TEST(test_mesh_adjacent_cull) {
+    World w = air_world();
+    w.set(1, 70, 1, blk::STONE);
+    w.set(2, 70, 1, blk::STONE);
+    const MeshData m = mesh_of(w, ChunkPos{0, 4, 0});
+    CHECK(m.vertex_count() == 40);
+    CHECK(m.indices.size() == 60);
+}
+
+TEST(test_mesh_cull_across_chunks) {
+    World w = air_world();
+    w.set(15, 70, 1, blk::STONE);
+    w.set(16, 70, 1, blk::STONE);
+    CHECK(mesh_of(w, ChunkPos{0, 4, 0}).vertex_count() == 20);
+    CHECK(mesh_of(w, ChunkPos{1, 4, 0}).vertex_count() == 20);
+
+    World w2 = air_world();
+    w2.set(-1, 70, 1, blk::STONE);
+    w2.set(0, 70, 1, blk::STONE);
+    CHECK(mesh_of(w2, ChunkPos{-1, 4, 0}).vertex_count() == 20);
+    CHECK(mesh_of(w2, ChunkPos{0, 4, 0}).vertex_count() == 20);
+}
+
+TEST(test_mesh_cull_across_vertical_chunks) {
+    World w = air_world();
+    w.set(1, 79, 1, blk::STONE);
+    w.set(1, 80, 1, blk::STONE);
+    CHECK(mesh_of(w, ChunkPos{0, 4, 0}).vertex_count() == 20);
+    CHECK(mesh_of(w, ChunkPos{0, 5, 0}).vertex_count() == 20);
+}
+
+TEST(test_mesh_cull_across_z_chunks) {
+    World w = air_world();
+    w.set(1, 70, 15, blk::STONE);
+    w.set(1, 70, 16, blk::STONE);
+    CHECK(mesh_of(w, ChunkPos{0, 4, 0}).vertex_count() == 20);
+    CHECK(mesh_of(w, ChunkPos{0, 4, 1}).vertex_count() == 20);
+
+    World w2 = air_world();
+    w2.set(1, 70, -1, blk::STONE);
+    w2.set(1, 70, 0, blk::STONE);
+    CHECK(mesh_of(w2, ChunkPos{0, 4, -1}).vertex_count() == 20);
+    CHECK(mesh_of(w2, ChunkPos{0, 4, 0}).vertex_count() == 20);
+}
+
+TEST(test_mesh_world_bottom_hidden) {
+    World w = air_world();
+    w.set(1, 0, 1, blk::STONE);
+    CHECK(mesh_of(w, ChunkPos{0, 0, 0}).vertex_count() == 20);
+}
+
+TEST(test_mesh_world_top) {
+    World w = air_world();
+    w.set(1, 255, 1, blk::STONE);
+    const MeshData m = mesh_of(w, ChunkPos{0, 15, 0});
+    CHECK(m.vertex_count() == 24);
+    float max_y = 0.f;
+    for (std::size_t i = 0; i < m.vertex_count(); ++i)
+        if (pos_at(m, i).y > max_y) max_y = pos_at(m, i).y;
+    CHECK(max_y == 256.f);
+}
+
+TEST(test_mesh_empty) {
+    World w = air_world();
+    const MeshData m = mesh_of(w, ChunkPos{0, 10, 0});
+    CHECK(m.vertex_count() == 0);
+    CHECK(m.indices.empty());
+    CHECK(m.colors.empty());
+}
+
+TEST(test_mesh_winding) {
+    World w = air_world();
+    w.set(1, 70, 1, blk::STONE);
+    const MeshData m = mesh_of(w, ChunkPos{0, 4, 0});
+    CHECK(m.indices.size() == 36);
+    for (std::size_t t = 0; t + 2 < m.indices.size(); t += 3) {
+        const V3 a = pos_at(m, m.indices[t]), b = pos_at(m, m.indices[t + 1]),
+                 c = pos_at(m, m.indices[t + 2]);
+        const V3 n = normal_at(m, m.indices[t]);
+        const V3 e1{b.x - a.x, b.y - a.y, b.z - a.z}, e2{c.x - a.x, c.y - a.y, c.z - a.z};
+        const V3 cr{e1.y * e2.z - e1.z * e2.y, e1.z * e2.x - e1.x * e2.z, e1.x * e2.y - e1.y * e2.x};
+        CHECK(cr.x * n.x + cr.y * n.y + cr.z * n.z > 0.f);
+    }
+}
+
+TEST(test_mesh_normals_unit_and_outward) {
+    World w = air_world();
+    w.set(1, 70, 1, blk::STONE);
+    const MeshData m = mesh_of(w, ChunkPos{0, 4, 0});
+    int per_face[6] = {0, 0, 0, 0, 0, 0};
+    for (std::size_t i = 0; i < m.vertex_count(); ++i) {
+        const V3 n = normal_at(m, i), p = pos_at(m, i);
+        CHECK(n.x * n.x + n.y * n.y + n.z * n.z == 1.f);
+        // The vertex lies on the block face the normal points out of.
+        const int f = face_of(n);
+        ++per_face[f];
+        if (f == PX) CHECK(p.x == 2.f);
+        if (f == NX) CHECK(p.x == 1.f);
+        if (f == PY) CHECK(p.y == 71.f);
+        if (f == NY) CHECK(p.y == 70.f);
+        if (f == PZ) CHECK(p.z == 2.f);
+        if (f == NZ) CHECK(p.z == 1.f);
+    }
+    for (int f = 0; f < 6; ++f) CHECK(per_face[f] == 4);
+}
+
+TEST(test_mesh_shade_and_uv) {
+    World w = air_world();
+    w.set(1, 70, 1, blk::GRASS);
+    const MeshData m = mesh_of(w, ChunkPos{0, 4, 0});
+    CHECK(m.vertex_count() == 24);
+    int top = 0, bottom = 0;
+    for (std::size_t i = 0; i < m.vertex_count(); ++i) {
+        const V3 n = normal_at(m, i);
+        const uint8_t r = m.colors[i * 4], g = m.colors[i * 4 + 1], b = m.colors[i * 4 + 2],
+                      a = m.colors[i * 4 + 3];
+        CHECK(r == g);
+        CHECK(g == b);
+        CHECK(a == 255);
+        const float u = m.texcoords[i * 2], v = m.texcoords[i * 2 + 1];
+        if (n.y > 0.5f) {
+            ++top;
+            CHECK(r == 255);
+            CHECK(u >= 0.f && u <= 0.125f);
+            CHECK(v >= 0.f && v <= 0.125f);
+        } else if (n.y < -0.5f) {
+            ++bottom;
+            CHECK(r == 128);
+        } else if (n.x != 0.f) {
+            CHECK(r == 204);
+        } else {
+            CHECK(r == 166);
+        }
+    }
+    CHECK(top == 4);
+    CHECK(bottom == 4);
+}
+
+TEST(test_mesh_positions_world_space) {
+    World w = air_world();
+    w.set(-1, 70, 1, blk::STONE);
+    const MeshData m = mesh_of(w, ChunkPos{-1, 4, 0});
+    CHECK(m.vertex_count() == 24);
+    for (std::size_t i = 0; i < m.vertex_count(); ++i) {
+        const V3 p = pos_at(m, i);
+        CHECK(p.x >= -1.f && p.x <= 0.f);
+        CHECK(p.y >= 70.f && p.y <= 71.f);
+        CHECK(p.z >= 1.f && p.z <= 2.f);
+    }
+}
+
+TEST(test_mesh_far_coordinates) {
+    // Column x = 62500 starts at block x = 1,000,000; its neighbors are unloaded (AIR).
+    World w(1);
+    w.insert_column(ColumnPos{62500, -62500}, Column{});
+    w.set(1000000, 70, -1000000, blk::STONE);
+    const MeshData m = mesh_of(w, ChunkPos{62500, 4, -62500});
+    CHECK(m.vertex_count() == 24);
+    for (std::size_t i = 0; i < m.vertex_count(); ++i) {
+        const V3 p = pos_at(m, i);
+        CHECK(p.x == 1000000.f || p.x == 1000001.f);
+        CHECK(p.z == -1000000.f || p.z == -999999.f);
+    }
+}
+
+TEST(test_mesh_unloaded_neighbor_shows_face) {
+    // Column 2 is unloaded, so the block at x = 31 faces AIR on +X and keeps all 6 faces.
+    World w = air_world();
+    w.set(31, 70, 1, blk::STONE);
+    CHECK(mesh_of(w, ChunkPos{1, 4, 0}).vertex_count() == 24);
+}
+
+TEST(test_mesh_full_chunk) {
+    World w = air_world();
+    for (int y = 64; y < 80; ++y)
+        for (int z = 0; z < 16; ++z)
+            for (int x = 0; x < 16; ++x) w.set(x, y, z, blk::STONE);
+    const MeshData m = mesh_of(w, ChunkPos{0, 4, 0});
+    CHECK(m.vertex_count() == 6144);
+    CHECK(m.indices.size() == 9216);
+    CHECK(indices_in_range(m));
+}
+
+TEST(test_mesh_checkerboard_worst_case) {
+    World w = air_world();
+    for (int y = 64; y < 80; ++y)
+        for (int z = 0; z < 16; ++z)
+            for (int x = 0; x < 16; ++x)
+                if ((x + y + z) % 2 == 0) w.set(x, y, z, blk::STONE);
+    const MeshData m = mesh_of(w, ChunkPos{0, 4, 0});
+    CHECK(m.vertex_count() == 49152);
+    CHECK(m.indices.size() == 73728);
+    CHECK(indices_in_range(m));
+}
+
+TEST(test_mesh_uv_every_tile) {
+    for (BlockId id = 1; id < blk::COUNT; ++id) {
+        World w = air_world();
+        w.set(1, 70, 1, id);
+        const MeshData m = mesh_of(w, ChunkPos{0, 4, 0});
+        CHECK(m.vertex_count() == 24);
+        for (std::size_t i = 0; i < m.vertex_count(); ++i) {
+            const int t = block_def(id).tiles[static_cast<std::size_t>(face_of(normal_at(m, i)))];
+            const float u0 = static_cast<float>(t % 8) / 8.f, v0 = static_cast<float>(t / 8) / 8.f;
+            const float u = m.texcoords[i * 2], v = m.texcoords[i * 2 + 1];
+            CHECK(u >= u0 && u <= u0 + 0.125f);
+            CHECK(v >= v0 && v <= v0 + 0.125f);
+        }
+    }
+}
+
+TEST(test_mesh_uv_covers_whole_tile) {
+    // Each face maps the full tile: its 4 UVs reach both edges of the rect in u and in v.
+    World w = air_world();
+    w.set(1, 70, 1, blk::LOG);
+    const MeshData m = mesh_of(w, ChunkPos{0, 4, 0});
+    for (std::size_t f = 0; f + 3 < m.vertex_count(); f += 4) {
+        float umin = 1.f, umax = 0.f, vmin = 1.f, vmax = 0.f;
+        for (std::size_t i = f; i < f + 4; ++i) {
+            const float u = m.texcoords[i * 2], v = m.texcoords[i * 2 + 1];
+            umin = u < umin ? u : umin;
+            umax = u > umax ? u : umax;
+            vmin = v < vmin ? v : vmin;
+            vmax = v > vmax ? v : vmax;
+        }
+        CHECK_NEAR(umax - umin, 0.125, 1e-6);
+        CHECK_NEAR(vmax - vmin, 0.125, 1e-6);
+    }
+}
+
+TEST(test_mesh_side_texture_upright) {
+    // On side faces the top edge of the block uses the top edge of the tile (smaller v).
+    World w = air_world();
+    w.set(1, 70, 1, blk::GRASS);
+    const MeshData m = mesh_of(w, ChunkPos{0, 4, 0});
+    const float v_top = 0.f, v_bottom = 0.125f;  // T_GRASS_SIDE = 1 sits in row 0
+    for (std::size_t i = 0; i < m.vertex_count(); ++i) {
+        const V3 n = normal_at(m, i);
+        if (n.y != 0.f) continue;
+        const float v = m.texcoords[i * 2 + 1];
+        if (pos_at(m, i).y == 71.f) CHECK(v == v_top);
+        else CHECK(v == v_bottom);
+    }
+}
+
+TEST(test_padded_snapshot_borders) {
+    World w = air_world();
+    w.set(-1, 70, 0, blk::SAND);    // x neighbor of chunk {0,4,0}
+    w.set(16, 79, 15, blk::PLANKS);  // +X +Y corner side
+    w.set(5, 80, 5, blk::LOG);       // +Y neighbor
+    w.set(5, 63, 5, blk::DIRT);      // -Y neighbor
+    w.set(3, 70, 4, blk::STONE);     // inside
+    w.set(7, 72, -1, blk::LEAVES);   // -Z neighbor
+    w.set(8, 73, 16, blk::GRASS);    // +Z neighbor
+    const Padded pad = snapshot(w, ChunkPos{0, 4, 0});
+    CHECK(pad.at(7, 8, -1) == blk::LEAVES);
+    CHECK(pad.at(8, 9, 16) == blk::GRASS);
+    CHECK(pad.at(-1, 6, 0) == blk::SAND);
+    CHECK(pad.at(16, 15, 15) == blk::PLANKS);
+    CHECK(pad.at(5, 16, 5) == blk::LOG);
+    CHECK(pad.at(5, -1, 5) == blk::DIRT);
+    CHECK(pad.at(3, 6, 4) == blk::STONE);
+    CHECK(pad.at(0, 0, 0) == blk::AIR);
+}
+
+TEST(test_padded_snapshot_world_limits) {
+    World w = air_world();
+    const Padded bottom = snapshot(w, ChunkPos{0, 0, 0});
+    CHECK(bottom.at(4, -1, 4) == blk::DEEPSTONE);  // below the world reads as DEEPSTONE
+    const Padded top = snapshot(w, ChunkPos{0, 15, 0});
+    CHECK(top.at(4, 16, 4) == blk::AIR);           // above the world reads as AIR
+    const Padded edge = snapshot(w, ChunkPos{1, 4, 0});
+    CHECK(edge.at(16, 4, 4) == blk::AIR);          // unloaded column reads as AIR
+}
+
+TEST(test_mesh_unknown_id_is_air) {
+    Padded pad;
+    pad.b[static_cast<std::size_t>(1 + 1 * 18 + 1 * 324)] = 500;  // local (0,0,0), id >= COUNT
+    CHECK(pad.at(0, 0, 0) == 500);
+    CHECK(build_mesh(pad, ChunkPos{0, 4, 0}).vertex_count() == 0);
+}
+
+TEST(test_mesh_deterministic) {
+    World w = air_world();
+    for (int i = 0; i < 40; ++i) w.set((i * 7) % 16, 64 + (i * 5) % 16, (i * 3) % 16, blk::LEAVES);
+    const Padded pad = snapshot(w, ChunkPos{0, 4, 0});
+    const MeshData a = build_mesh(pad, ChunkPos{0, 4, 0});
+    const MeshData b = build_mesh(pad, ChunkPos{0, 4, 0});
+    CHECK(a.vertex_count() > 0);
+    CHECK(a.positions == b.positions);
+    CHECK(a.texcoords == b.texcoords);
+    CHECK(a.normals == b.normals);
+    CHECK(a.colors == b.colors);
+    CHECK(a.indices == b.indices);
+}
+
+TEST(test_mesh_concurrent_build) {
+    World w = air_world();
+    w.set(1, 70, 1, blk::STONE);
+    w.set(9, 75, 9, blk::SAND);
+    const Padded pad = snapshot(w, ChunkPos{0, 4, 0});
+    std::vector<std::size_t> counts(4, 0);
+    std::vector<std::thread> threads;
+    for (std::size_t t = 0; t < counts.size(); ++t)
+        threads.emplace_back([&pad, &counts, t] {
+            counts[t] = build_mesh(pad, ChunkPos{0, 4, 0}).vertex_count();
+        });
+    for (auto& th : threads) th.join();
+    for (std::size_t c : counts) CHECK(c == 48);
+}

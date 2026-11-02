@@ -1,0 +1,77 @@
+{
+  "version": 5,
+  "cmakeMinimumRequired": { "major": 3, "minor": 25, "patch": 0 },
+  "configurePresets": [
+    {
+      "name": "base",
+      "hidden": true,
+      "binaryDir": "${sourceDir}/build/${presetName}"
+    },
+    {
+      "name": "linux-only",
+      "hidden": true,
+      "condition": { "type": "equals", "lhs": "${hostSystemName}", "rhs": "Linux" }
+    },
+    {
+      "name": "dev",
+      "displayName": "Debug with ASan and UBSan",
+      "inherits": ["base", "linux-only"],
+      "cacheVariables": {
+        "CMAKE_BUILD_TYPE": "Debug",
+        "NIMECRAFT_SANITIZE": "address,undefined",
+        "CMAKE_EXPORT_COMPILE_COMMANDS": "ON"
+      }
+    },
+    {
+      "name": "tsan",
+      "displayName": "RelWithDebInfo with ThreadSanitizer",
+      "inherits": ["base", "linux-only"],
+      "cacheVariables": {
+        "CMAKE_BUILD_TYPE": "RelWithDebInfo",
+        "NIMECRAFT_SANITIZE": "thread"
+      }
+    },
+    {
+      "name": "coverage",
+      "displayName": "Debug with GCC coverage counters",
+      "inherits": ["base", "linux-only"],
+      "cacheVariables": {
+        "CMAKE_BUILD_TYPE": "Debug",
+        "NIMECRAFT_COVERAGE": "ON"
+      }
+    },
+    {
+      "name": "release",
+      "displayName": "Release",
+      "inherits": ["base"],
+      "cacheVariables": {
+        "CMAKE_BUILD_TYPE": "Release"
+      }
+    },
+    {
+      "name": "win-cross",
+      "displayName": "Release for Windows via MinGW-w64, tests under Wine",
+      "inherits": ["base", "linux-only"],
+      "toolchainFile": "${sourceDir}/cmake/mingw-w64-x86_64.cmake",
+      "cacheVariables": {
+        "CMAKE_BUILD_TYPE": "Release"
+      }
+    },
+    {
+      "name": "msvc",
+      "displayName": "Visual Studio 2022, x64",
+      "inherits": ["base"],
+      "generator": "Visual Studio 17 2022",
+      "architecture": { "value": "x64", "strategy": "set" },
+      "condition": { "type": "equals", "lhs": "${hostSystemName}", "rhs": "Windows" }
+    }
+  ],
+  "buildPresets": [
+    { "name": "dev", "configurePreset": "dev" },
+    { "name": "tsan", "configurePreset": "tsan" },
+    { "name": "coverage", "configurePreset": "coverage" },
+    { "name": "release", "configurePreset": "release" },
+    { "name": "win-cross", "configurePreset": "win-cross" },
+    { "name": "msvc", "configurePreset": "msvc" }
+  ]
+}

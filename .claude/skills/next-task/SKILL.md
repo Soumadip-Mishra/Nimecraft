@@ -13,7 +13,7 @@ This skill is the checklist for running it; the plan wins on any conflict.
 
 1. `git status --short`: the tree must be clean apart from files this task will create.
    If not, list the stray files and ask before continuing.
-2. Check tools: `cmake --version` (>= 3.24), `x86_64-w64-mingw32-g++-posix --version`, `wine --version`.
+2. Check tools: `cmake --version` (>= 3.25), `x86_64-w64-mingw32-g++-posix --version`, `wine --version`.
    If any is missing, stop and tell the user to run `! sudo apt install cmake g++-mingw-w64-x86-64-posix wine` (M1 Task 1 Step 1), unless that step is the task at hand.
 
 ## 1. Pick the task
