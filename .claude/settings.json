@@ -1,0 +1,46 @@
+{
+  "permissions": {
+    "allow": [
+      "Bash(make)",
+      "Bash(make *)",
+      "Bash(cmake *)",
+      "Bash(ctest *)",
+      "Bash(wine build/*)",
+      "Bash(wine ./build/*)",
+      "Bash(./build/*)",
+      "Bash(timeout * ./build/*)",
+      "Bash(file build/*)",
+      "Bash(x86_64-w64-mingw32-objdump *)",
+      "Bash(python3 tools/coverage_check.py *)",
+      "Bash(python3 .claude/hooks/guard.py *)",
+      "Bash(git status)",
+      "Bash(git status *)",
+      "Bash(git diff)",
+      "Bash(git diff *)",
+      "Bash(git log *)",
+      "Bash(git show *)"
+    ],
+    "ask": [
+      "Bash(git commit *)",
+      "Bash(git push *)"
+    ]
+  },
+  "hooks": {
+    "PreToolUse": [
+      {
+        "matcher": "Write|Edit|MultiEdit",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "python3 \"$CLAUDE_PROJECT_DIR/.claude/hooks/guard.py\"",
+            "timeout": 15,
+            "statusMessage": "Nimecraft guard"
+          }
+        ]
+      }
+    ]
+  },
+  "enabledPlugins": {
+    "clangd-lsp@claude-plugins-official": true
+  }
+}
