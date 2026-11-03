@@ -305,7 +305,8 @@ TEST(test_feature_rule_table) {
         for (ColumnPos c : biome_columns(biome, 3)) {
             const Column col = generate_column(SEED, c, NO_FEATURES);
             std::map<std::pair<int, int>, Feature> got;
-            for (const Feature& f : features_near(SEED, c, 0)) got.emplace(std::make_pair(f.x, f.z), f);
+            for (const Feature& f : features_near(SEED, c, 0))
+                if (f.type != FeatureType::Glowcap) got.emplace(std::make_pair(f.x, f.z), f);  // M3: cave floors
             for (int lz = 0; lz < CHUNK; ++lz)
                 for (int lx = 0; lx < CHUNK; ++lx) {
                     const int x = c.x * CHUNK + lx, z = c.z * CHUNK + lz;
@@ -592,4 +593,138 @@ TEST(test_highlands_oak_boundary) {
         }
     CHECK(saw139);
     CHECK(saw140);
+}
+
+// ---- M3 Task 1: glowcaps ----
+
+TEST(test_glowcaps_in_caves) {
+    // Over the 64 columns [-4, 4)^2 of seed 7: at least one GLOWCAP; every GLOWCAP has y < 50,
+    // STONE below, and some non-AIR block above it (a cave roof, not open sky).
+    int found = 0;
+    for (int cz = -4; cz < 4; ++cz)
+        for (int cx = -4; cx < 4; ++cx) {
+            const ColumnPos c{cx, cz};
+            const Column col = generate_column(SEED, c);
+            for (int lz = 0; lz < CHUNK; ++lz)
+                for (int lx = 0; lx < CHUNK; ++lx) {
+                    const int x = c.x * CHUNK + lx, z = c.z * CHUNK + lz;
+                    for (int y = 1; y < WORLD_HEIGHT - 1; ++y) {
+                        if (block_at(col, c, x, y, z) != blk::GLOWCAP) continue;
+                        ++found;
+                        CHECK(y < 50);
+                        CHECK(block_at(col, c, x, y - 1, z) == blk::STONE);
+                        bool roof = false;
+                        for (int yy = y + 1; yy < WORLD_HEIGHT && !roof; ++yy)
+                            roof = block_at(col, c, x, yy, z) != blk::AIR;
+                        CHECK(roof);
+                    }
+                }
+        }
+    CHECK(found > 0);
+}
+
+TEST(test_glowcap_features_rule) {
+    // features_near reports at most one Glowcap per cell: the lowest y in [5, 49] where the cell is
+    // a cave (is_cave), the cell below is not, and hash2((seed ^ 0x61C0) + y * 0x27D4EB2F, x, z) %
+    // 90 == 0. Placed, it becomes GLOWCAP exactly where the column holds AIR above STONE.
+    int seen = 0, placed = 0;
+    for (int k = 0; k < 16; ++k) {
+        const ColumnPos c{k % 4 - 2, k / 4 - 2};  // [-2, 2)^2
+        const Column bare = generate_column(SEED, c, NO_FEATURES);
+        const Column full = generate_column(SEED, c);
+        std::map<std::pair<int, int>, int> caps;
+        for (const Feature& f : features_near(SEED, c, 0)) {
+            if (f.type != FeatureType::Glowcap) continue;
+            ++seen;
+            CHECK(f.size == 1);
+            CHECK(f.y >= 5 && f.y < 50);
+            CHECK(caps.emplace(std::make_pair(f.x, f.z), f.y).second);  // one per cell
+        }
+        for (int lz = 0; lz < CHUNK; ++lz)
+            for (int lx = 0; lx < CHUNK; ++lx) {
+                const int x = c.x * CHUNK + lx, z = c.z * CHUNK + lz;
+                const int h = terrain_height(SEED, x, z);
+                int want = -1;
+                for (int y = 5; y < 50 && want < 0; ++y) {
+                    const uint32_t r = hash2((SEED ^ 0x61C0u) + static_cast<uint32_t>(y) * 0x27D4EB2Fu, x, z);
+                    if (r % 90 == 0 && is_cave(SEED, x, y, z, h) && !is_cave(SEED, x, y - 1, z, h)) want = y;
+                }
+                const auto it = caps.find({x, z});
+                // A ravine across the cell can drop it; otherwise the rule decides.
+                if (it != caps.end()) CHECK(it->second == want);
+                bool near_ravine = false;  // any ravine (at most 111 long) that might reach the cell
+                for (const Ravine& rv : ravines_near(SEED, c))
+                    near_ravine = near_ravine || (std::abs(rv.x0 - x) < 128 && std::abs(rv.z0 - z) < 128);
+                if (want >= 0 && !near_ravine) CHECK(it != caps.end());
+                for (int y = 1; y < 50; ++y) {
+                    const bool cap = it != caps.end() && it->second == y && block_at(bare, c, x, y, z) == blk::AIR &&
+                                     block_at(bare, c, x, y - 1, z) == blk::STONE;
+                    CHECK((block_at(full, c, x, y, z) == blk::GLOWCAP) == cap);
+                    placed += cap ? 1 : 0;
+                }
+            }
+    }
+    CHECK(seen > 0);
+    CHECK(placed > 0);
+}
+
+TEST(test_glowcap_place_rules) {
+    // place_feature puts a GLOWCAP only into AIR that stands on STONE.
+    const ColumnPos c{-1, -1};
+    const int x = -8, z = -8;
+    Column col = filled_column(c, blk::AIR);
+    const auto set = [&](int y, BlockId b) {
+        col[static_cast<std::size_t>(y / CHUNK)]->set(x - c.x * CHUNK, y % CHUNK, z - c.z * CHUNK, b);
+    };
+    set(19, blk::STONE);
+    place_feature(col, c, Feature{x, 20, z, FeatureType::Glowcap, 1});
+    CHECK(block_at(col, c, x, 20, z) == blk::GLOWCAP);
+    place_feature(col, c, Feature{x, 30, z, FeatureType::Glowcap, 1});  // AIR below
+    CHECK(block_at(col, c, x, 30, z) == blk::AIR);
+    set(39, blk::DIRT);
+    place_feature(col, c, Feature{x, 40, z, FeatureType::Glowcap, 1});  // not STONE below
+    CHECK(block_at(col, c, x, 40, z) == blk::AIR);
+    set(44, blk::STONE);
+    set(45, blk::STONE);
+    place_feature(col, c, Feature{x, 45, z, FeatureType::Glowcap, 1});  // the cell is not AIR
+    CHECK(block_at(col, c, x, 45, z) == blk::STONE);
+    place_feature(col, c, Feature{x, 0, z, FeatureType::Glowcap, 1});  // nothing below y = 0
+    CHECK(block_at(col, c, x, 0, z) == blk::AIR);
+    CHECK(count_id(col, blk::GLOWCAP) == 1);
+}
+
+TEST(test_glowcap_y_boundary) {
+    // Boundary y < 50: a cell whose only glowcap floor by the rule would be y = 50 gets none, and a
+    // cell whose lowest floor is y = 49 gets one there.
+    bool at50 = false, at49 = false;
+    for (int z = 0; z < 512 && !(at50 && at49); ++z)
+        for (int x = 0; x < 512 && !(at50 && at49); ++x) {
+            const int h = terrain_height(SEED, x, z);
+            auto floor_at = [&](int y) {
+                return hash2((SEED ^ 0x61C0u) + static_cast<uint32_t>(y) * 0x27D4EB2Fu, x, z) % 90 == 0 &&
+                       is_cave(SEED, x, y, z, h) && !is_cave(SEED, x, y - 1, z, h);
+            };
+            const int want = floor_at(50) ? 50 : (floor_at(49) ? 49 : -1);
+            if (want < 0 || (want == 50 ? at50 : at49)) continue;
+            bool lower = false;
+            for (int y = 5; y < want && !lower; ++y) lower = floor_at(y);
+            if (lower) continue;
+            const ColumnPos c = column_at(x, z);
+            bool cut = false;  // skip cells any ravine (at most 111 long) might reach
+            for (const Ravine& r : ravines_near(SEED, c))
+                cut = cut || (std::abs(r.x0 - x) < 128 && std::abs(r.z0 - z) < 128);
+            if (cut) continue;
+            int got = -1;
+            for (const Feature& f : features_near(SEED, c, 0))
+                if (f.type == FeatureType::Glowcap && f.x == x && f.z == z) got = f.y;
+            if (want == 50) {
+                at50 = true;
+                CHECK(got == -1);
+            } else {
+                at49 = true;
+                CHECK(got == 49);
+            }
+        }
+    CHECK(at50);
+    CHECK(at49);
 }

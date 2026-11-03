@@ -11,6 +11,7 @@
 #include "render.hpp"
 #include "storage.hpp"
 #include "world.hpp"
+#include "world_time.hpp"
 
 #include "raylib.h"
 #include "raymath.h"
@@ -31,10 +32,11 @@
 
 namespace {
 
-constexpr BlockId HOTBAR[] = {blk::GRASS, blk::DIRT, blk::STONE, blk::SAND,
-                              blk::LOG,   blk::LEAVES, blk::PLANKS};
+// Creative-style block choices until the M4 inventory; TORCH and LANTERN from M3.
+constexpr BlockId HOTBAR[] = {blk::GRASS,  blk::DIRT,   blk::STONE, blk::SAND,   blk::LOG,
+                              blk::LEAVES, blk::PLANKS, blk::TORCH, blk::LANTERN};
 constexpr int HOTBAR_SIZE = static_cast<int>(sizeof HOTBAR / sizeof HOTBAR[0]);
-constexpr Color SKY{135, 206, 235, 255};
+constexpr double DEBUG_TIME_STEP = 1000;  // F4 skips this many ticks
 constexpr Color UNDERWATER{20, 60, 160, 110};  // screen tint while the eye is in WATER
 constexpr int SMOKE_FRAMES = 600;
 constexpr double SMOKE_SPAWN_TIMEOUT_S = 60.0;
@@ -128,16 +130,18 @@ void draw_hud(int selected) {
     }
 }
 
-void draw_debug(const Player& p, const World& w, const ChunkManager& mgr, int drawn) {
-    char lines[5][96];
+void draw_debug(const Player& p, const World& w, const ChunkManager& mgr, int drawn, const WorldTime& t) {
+    constexpr int LINES = 6;
+    char lines[LINES][96];
     std::snprintf(lines[0], sizeof lines[0], "FPS %d", GetFPS());
     std::snprintf(lines[1], sizeof lines[1], "XYZ %.2f %.2f %.2f", static_cast<double>(p.pos.x),
                   static_cast<double>(p.pos.y), static_cast<double>(p.pos.z));
     std::snprintf(lines[2], sizeof lines[2], "Loaded columns %zu", w.loaded_columns().size());
     std::snprintf(lines[3], sizeof lines[3], "Pending jobs %zu", mgr.pending_jobs());
     std::snprintf(lines[4], sizeof lines[4], "Chunks drawn %d", drawn);
-    DrawRectangle(6, 6, 260, 5 * 20 + 8, Color{0, 0, 0, 140});
-    for (int i = 0; i < 5; ++i) DrawText(lines[i], 12, 12 + i * 20, 18, WHITE);
+    std::snprintf(lines[5], sizeof lines[5], "Time %d %s (F4 +1000)", t.day_tick(), t.is_night() ? "night" : "day");
+    DrawRectangle(6, 6, 300, LINES * 20 + 8, Color{0, 0, 0, 140});
+    for (int i = 0; i < LINES; ++i) DrawText(lines[i], 12, 12 + i * 20, 18, WHITE);
 }
 
 int run(const CliOptions& o) {
@@ -160,8 +164,10 @@ int run(const CliOptions& o) {
     ChunkManager mgr(world, pool, store ? &*store : nullptr, o.rd);
 
     Player player{};
+    WorldTime world_time;
     ColumnPos spawn_col{0, 0};
     if (meta) {
+        world_time.ticks = meta->time;
         player.pos = Vector3{meta->px, meta->py, meta->pz};
         player.yaw = meta->yaw;
         player.pitch = meta->pitch;
@@ -177,7 +183,6 @@ int run(const CliOptions& o) {
     SetExitKey(KEY_NULL);
     Renderer renderer;
     renderer.init();
-    renderer.set_fog(fog_range(o.rd), SKY);
 
     bool captured = !o.smoke;
     if (captured) DisableCursor();
@@ -204,6 +209,7 @@ int run(const CliOptions& o) {
             }
         }
         if (IsKeyPressed(KEY_F3)) debug = !debug;
+        if (IsKeyPressed(KEY_F4)) world_time.ticks += DEBUG_TIME_STEP;
         selected = update_hotbar(selected);
 
         PlayerInput in = read_input(captured && !swallow_click);
@@ -211,7 +217,10 @@ int run(const CliOptions& o) {
             in.forward = 1.f;
             in.jump = true;  // hop up 1-block steps so the walk keeps streaming new terrain
         }
-        if (spawned) player_update(player, world, in, dt);
+        if (spawned) {
+            player_update(player, world, in, dt);
+            world_time.advance(dt);
+        }
         mgr.update(spawned ? column_at(player.pos) : spawn_col);
         if (!spawned && mgr.column_ready(spawn_col)) {
             if (!meta) player = spawn_player(world);
@@ -237,20 +246,26 @@ int run(const CliOptions& o) {
         for (const MeshResult& m : mgr.take_meshes(MESH_UPLOADS_PER_FRAME)) renderer.upload(m.pos, m.mesh);
         for (ChunkPos p : mgr.take_removed()) renderer.remove(p);
 
+        const int day_tick = world_time.day_tick();
+        const Color sky = sky_color(day_tick);
+        renderer.set_fog(fog_range(o.rd), sky);
+        renderer.set_daylight(daylight_at(day_tick));
+
         BeginDrawing();
-        ClearBackground(SKY);
+        ClearBackground(sky);
         if (spawned) {
             const Vector3 eye = player_eye(player);
             const Camera3D cam{eye, Vector3Add(eye, player_look(player)), Vector3{0, 1, 0}, 70.f,
                                CAMERA_PERSPECTIVE};
             const int h = std::max(1, GetScreenHeight());
             BeginMode3D(cam);
+            renderer.draw_sky(cam, sun_angle(day_tick));
             drawn = renderer.draw(cam, static_cast<float>(GetScreenWidth()) / static_cast<float>(h));
             if (hit.hit) renderer.draw_highlight(hit.x, hit.y, hit.z);
             EndMode3D();
             if (eye_in_water(player, world)) DrawRectangle(0, 0, GetScreenWidth(), GetScreenHeight(), UNDERWATER);
             draw_hud(selected);
-            if (debug) draw_debug(player, world, mgr, drawn);
+            if (debug) draw_debug(player, world, mgr, drawn, world_time);
         } else {
             draw_centered_text("Generating world...", GetScreenHeight() / 2 - 15, 30, WHITE);
         }
@@ -283,7 +298,10 @@ int run(const CliOptions& o) {
                     static_cast<int>(std::ceil(smoke_max_frame * 1000.f)));
         return 0;
     }
-    if (spawned) meta = WorldMeta{seed, player.pos.x, player.pos.y, player.pos.z, player.yaw, player.pitch};
+    if (spawned) {
+        meta = WorldMeta{seed, player.pos.x, player.pos.y, player.pos.z, player.yaw, player.pitch};
+        meta->time = world_time.ticks;
+    }
     return save_world(world, *store, meta_file, meta) ? 0 : 1;
 }
 

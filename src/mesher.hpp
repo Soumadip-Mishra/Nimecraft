@@ -17,20 +17,25 @@ constexpr int ATLAS_TILES = 8;  // 8x8 grid of 16 px tiles = 128x128 atlas
 
 enum Shade : uint8_t { SHADE_TOP = 255, SHADE_X = 204, SHADE_Z = 166, SHADE_BOTTOM = 128 };
 
-// The chunk's 16^3 blocks plus a 1-block border: local coordinates -1..16 on each axis.
+// The chunk's 16^3 blocks plus a 1-block border: local coordinates -1..16 on each axis, with each
+// cell's light packed as in Chunk::light (high nibble sky, low nibble block).
 struct Padded {
     std::array<BlockId, 18 * 18 * 18> b{};
-    BlockId at(int lx, int ly, int lz) const;  // lx, ly, lz in [-1, 16]
+    std::array<uint8_t, 18 * 18 * 18> light{};
+    BlockId at(int lx, int ly, int lz) const;        // lx, ly, lz in [-1, 16]
+    uint8_t light_at(int lx, int ly, int lz) const;  // same range
 };
 
-// Copies chunk p and its border. Below the world reads DEEPSTONE, above it and unloaded columns
-// read AIR, exactly as World::get does.
+// Copies chunk p and its border, blocks and light. Below the world reads DEEPSTONE with no
+// light, above it AIR with sky 15, unloaded columns AIR with no light (blocks exactly as
+// World::get does).
 Padded snapshot(const World& w, ChunkPos p);  // main thread only
 
 // Quads only: every quad is 4 consecutive vertices and 6 consecutive indices into them.
 struct MeshData {
     std::vector<float> positions, texcoords, normals;  // 3, 2, 3 per vertex, world coordinates
-    std::vector<uint8_t> colors;                       // RGBA, R=G=B=shade, A=255
+    // RGBA per vertex: R = sky light * 17, G = block light * 17, B = face shade * AO, A = 255.
+    std::vector<uint8_t> colors;
     // 6 per quad. 32-bit: a Cutout layer can exceed 65,536 vertices (leaves never cull leaves),
     // so the renderer cuts layers with split_mesh before uploading 16-bit GPU indices.
     std::vector<uint32_t> indices;
@@ -52,6 +57,13 @@ struct ChunkMesh {
 // - Cross: two diagonal quads, each emitted for both sides (16 vertices), shade SHADE_X, never
 //   culled.
 // AIR and unknown ids (>= blk::COUNT) are never meshed.
+// Smooth light and ambient occlusion (cube and liquid faces): a vertex touches 4 cells on the
+// face side - the face's neighbor cell, side1 and side2 (that cell stepped toward the vertex
+// along each face axis), and the corner (both steps). R and G average sky and block light over
+// those of the 4 that are not opaque, times 17, rounded. AO level = (side1 && side2) ? 0 :
+// 3 - (side1 + side2 + corner), counting opaque cells; B = shade * {0.55, 0.7, 0.85, 1.0}[level],
+// rounded. A quad whose levels give a0 + a2 > a1 + a3 is split along its 1-3 diagonal instead of
+// 0-2. Cross quads take the light of the plant's own cell at every vertex and B = SHADE_X.
 ChunkMesh build_mesh(const Padded& pad, ChunkPos p);  // pure, thread-safe
 
 constexpr std::size_t MAX_PART_VERTICES = 65536;  // vertices a 16-bit index reaches

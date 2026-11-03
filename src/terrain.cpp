@@ -20,6 +20,10 @@ constexpr int FEATURE_MARGIN = 3;        // features reach 2 blocks from their c
 constexpr uint32_t OAK_SALT = 0x7EE5u, FLOWER_SALT = 0xF10Eu, TALL_GRASS_SALT = 0x6A55u, PINE_SALT = 0x714Eu,
                    CACTUS_SALT = 0xCAC7u;
 constexpr uint8_t OAK_TRUNK = 5;
+// Glowcaps: on cave floors below GLOWCAP_MAX_Y, one cell in GLOWCAP_CHANCE (per y layer).
+constexpr uint32_t GLOWCAP_SALT = 0x61C0u, GLOWCAP_Y_STEP = 0x27D4EB2Fu;
+constexpr int GLOWCAP_MAX_Y = 50;
+constexpr uint32_t GLOWCAP_CHANCE = 90;
 
 constexpr int CLIMATE_OCTAVES = 3;
 constexpr uint32_t TEMPERATURE_SALT = 0x7E3Au, HUMIDITY_SALT = 0x40D1u, CONTINENTAL_SALT = 0xC047u,
@@ -388,6 +392,59 @@ void place_ores_with(Column& col, ColumnPos c, uint32_t seed, const NeighborHeig
     }
 }
 
+// The surface feature of cell (f.x, f.z) with ground h >= SEA_LEVEL by its biome's rule
+// (features_near); fills f's type and size. f arrives as an oak of trunk OAK_TRUNK at y = h + 1.
+bool surface_feature(uint32_t seed, int h, Feature& f) {
+    const int x = f.x, z = f.z;
+    const Biome biome = biome_at(seed, x, z);
+    const BlockId top = surface_block(seed, biome, h, x, z);
+    const bool grass = top == blk::GRASS;
+    auto r = [&](uint32_t salt) { return hash2(seed ^ salt, x, z); };
+    switch (biome) {
+        case Biome::Forest:
+            return grass && r(OAK_SALT) % 12 == 0;
+        case Biome::Meadow:
+            if (!grass) return false;
+            if (r(OAK_SALT) % 200 == 0) return true;
+            f.size = 1;
+            if (r(FLOWER_SALT) % 24 == 0) {
+                f.type = FeatureType::Flower;
+                return true;
+            }
+            f.type = FeatureType::TallGrass;
+            return r(TALL_GRASS_SALT) % 4 == 0;
+        case Biome::Taiga:
+        case Biome::Snowfield: {
+            const uint32_t p = r(PINE_SALT);
+            f.type = FeatureType::PineTree;
+            f.size = static_cast<uint8_t>(6 + (p >> 8) % 3);
+            return (grass || top == blk::SNOW) && p % (biome == Biome::Taiga ? 14u : 60u) == 0;
+        }
+        case Biome::Desert: {
+            const uint32_t k = r(CACTUS_SALT);
+            f.type = FeatureType::Cactus;
+            f.size = static_cast<uint8_t>(1 + (k >> 8) % 3);
+            return top == blk::SAND && k % 150 == 0;
+        }
+        case Biome::Highlands:
+            return grass && h < HIGHLAND_OAK_MAX && r(OAK_SALT) % 80 == 0;
+        default:  // Ocean
+            return false;
+    }
+}
+
+// The glowcap y of cell (x, z) with ground h: the lowest y in [CAVE_MIN_Y, GLOWCAP_MAX_Y) whose hash
+// hits and where the cave noise opens a floor (cave at y, none at y - 1); -1 if none. The hash comes
+// first, so is_cave runs on about one layer in 90.
+int glowcap_y(uint32_t seed, int x, int z, int h) {
+    for (int y = CAVE_MIN_Y; y < GLOWCAP_MAX_Y; ++y) {
+        if (hash2((seed ^ GLOWCAP_SALT) + static_cast<uint32_t>(y) * GLOWCAP_Y_STEP, x, z) % GLOWCAP_CHANCE != 0)
+            continue;
+        if (is_cave(seed, x, y, z, h) && !is_cave(seed, x, y - 1, z, h)) return y;
+    }
+    return -1;
+}
+
 // features_near with the 3x3 heights around c already computed.
 std::vector<Feature> features_with(uint32_t seed, ColumnPos c, int margin, const NeighborHeights& nh) {
     margin = std::clamp(margin, 0, CHUNK);
@@ -395,7 +452,8 @@ std::vector<Feature> features_with(uint32_t seed, ColumnPos c, int margin, const
     std::vector<RavineLine> ravines[9];
     bool ravines_ready[9] = {};
     std::vector<Feature> out;
-    // x-major, z-minor: the output is sorted by (x, z), one feature per cell at most.
+    // x-major, z-minor: the output is sorted by (x, z), then by type (a surface feature, then a
+    // glowcap), at most one of each per cell.
     for (int lx = -margin; lx < CHUNK + margin; ++lx)
         for (int lz = -margin; lz < CHUNK + margin; ++lz) {
             const int nx = floor_div(lx, CHUNK), nz = floor_div(lz, CHUNK);
@@ -403,60 +461,21 @@ std::vector<Feature> features_with(uint32_t seed, ColumnPos c, int margin, const
             if (!nh.valid[n]) continue;
             const int x = x0 + lx, z = z0 + lz;  // in int: the neighbor is in the supported range
             const int h = nh.h[n][(lx - nx * CHUNK) + (lz - nz * CHUNK) * CHUNK];
-            if (h < SEA_LEVEL) continue;  // under water
-            const Biome biome = biome_at(seed, x, z);
-            const BlockId top = surface_block(seed, biome, h, x, z);
-            const bool grass = top == blk::GRASS;
-            auto r = [&](uint32_t salt) { return hash2(seed ^ salt, x, z); };
+            const int cap_y = glowcap_y(seed, x, z, h);
             Feature f{x, h + 1, z, FeatureType::OakTree, OAK_TRUNK};
-            bool hit = false;
-            switch (biome) {
-                case Biome::Forest:
-                    hit = grass && r(OAK_SALT) % 12 == 0;
-                    break;
-                case Biome::Meadow:
-                    if (!grass) break;
-                    hit = true;
-                    if (r(OAK_SALT) % 200 == 0) break;
-                    f.size = 1;
-                    if (r(FLOWER_SALT) % 24 == 0) {
-                        f.type = FeatureType::Flower;
-                    } else if (r(TALL_GRASS_SALT) % 4 == 0) {
-                        f.type = FeatureType::TallGrass;
-                    } else {
-                        hit = false;
-                    }
-                    break;
-                case Biome::Taiga:
-                case Biome::Snowfield: {
-                    const uint32_t p = r(PINE_SALT);
-                    hit = (grass || top == blk::SNOW) && p % (biome == Biome::Taiga ? 14u : 60u) == 0;
-                    f.type = FeatureType::PineTree;
-                    f.size = static_cast<uint8_t>(6 + (p >> 8) % 3);
-                    break;
-                }
-                case Biome::Desert: {
-                    const uint32_t k = r(CACTUS_SALT);
-                    hit = top == blk::SAND && k % 150 == 0;
-                    f.type = FeatureType::Cactus;
-                    f.size = static_cast<uint8_t>(1 + (k >> 8) % 3);
-                    break;
-                }
-                case Biome::Highlands:
-                    hit = grass && h < HIGHLAND_OAK_MAX && r(OAK_SALT) % 80 == 0;
-                    break;
-                default:  // Ocean
-                    break;
-            }
-            if (!hit) continue;
-            // A ravine that cuts this cell's surface leaves no ground for the feature.
+            const bool hit = h >= SEA_LEVEL && surface_feature(seed, h, f);  // none under water
+            if (!hit && cap_y < 0) continue;
+            // A ravine that cuts this cell leaves no ground for a surface feature and may open a
+            // glowcap's cave to the sky.
             if (!ravines_ready[n]) {
                 ravines[n] = ravine_lines(seed, ColumnPos{c.x + nx, c.z + nz});
                 ravines_ready[n] = true;
             }
             bool cut = false;
             for (const RavineLine& l : ravines[n]) cut = cut || ravine_covers(l, x, z);
-            if (!cut) out.push_back(f);
+            if (cut) continue;
+            if (hit) out.push_back(f);
+            if (cap_y >= 0) out.push_back(Feature{x, cap_y, z, FeatureType::Glowcap, 1});
         }
     return out;
 }
@@ -516,6 +535,12 @@ void place_feature(Column& col, ColumnPos c, const Feature& f) {
             break;
         case FeatureType::Flower:
             put(0, f.y, 0, blk::FLOWER, false);
+            break;
+        case FeatureType::Glowcap:
+            // Only on a cave floor that survived carving, ores, and geodes.
+            if (f.y >= 1 && f.y < WORLD_HEIGHT && ox >= 0 && ox < CHUNK && oz >= 0 && oz < CHUNK &&
+                cell(col, ox, f.y - 1, oz) == blk::STONE)
+                put(0, f.y, 0, blk::GLOWCAP, false);
             break;
     }
 }

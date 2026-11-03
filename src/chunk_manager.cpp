@@ -1,5 +1,6 @@
 #include "chunk_manager.hpp"
 
+#include "light.hpp"
 #include "storage.hpp"
 #include "terrain.hpp"
 
@@ -89,6 +90,20 @@ void ChunkManager::integrate_generation() {
         generating_.erase(r->pos);
         if (!within(r->pos, rd_ + 2)) continue;  // the player moved away while it was generated
         world_.insert_column(r->pos, std::move(r->column));
+        // Each pair of neighbors is stitched when the second of the two arrives, so light across
+        // their border is whole before either becomes ready to mesh; a later diagonal arrival
+        // re-dirties the chunks whose light it changes.
+        stitch_column_light(world_, r->pos);
+        // A meshed diagonal neighbor read this column as unloaded at its corner vertices (AO and
+        // smooth light): mesh its non-empty chunks again. Empty chunks have no faces either way.
+        for (const ColumnPos d : {ColumnPos{r->pos.x + 1, r->pos.z + 1}, ColumnPos{r->pos.x + 1, r->pos.z - 1},
+                                  ColumnPos{r->pos.x - 1, r->pos.z + 1}, ColumnPos{r->pos.x - 1, r->pos.z - 1}}) {
+            if (!meshed_.contains(d)) continue;
+            for (int y = 0; y < SECTIONS; ++y) {
+                const ChunkPos p{d.x, y, d.z};
+                if (!world_.chunk(p)->is_empty()) world_.mark_dirty(p);
+            }
+        }
     }
 }
 
@@ -158,7 +173,9 @@ void ChunkManager::schedule_generation() {
         pool_.submit([this, store, seed, c] {
             // A saved column wins over the generator; RegionStore is thread-safe.
             std::optional<Column> saved = store != nullptr ? store->load_column(c) : std::nullopt;
-            gen_results_.push(GenResult{c, saved ? std::move(*saved) : generate_column(seed, c)});
+            Column col = saved ? std::move(*saved) : generate_column(seed, c);
+            compute_column_light(col);  // light is never saved: computed for every column that arrives
+            gen_results_.push(GenResult{c, std::move(col)});
         });
     }
 }

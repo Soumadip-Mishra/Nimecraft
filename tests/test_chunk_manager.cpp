@@ -43,6 +43,18 @@ private:
     std::shared_future<void> gate_;
 };
 
+
+// M3 Task 2: an opaque block placed in open sky shades every cell below it down to the ground, so
+// its edit dirties those chunks too. The edit tests below cover scheduling, not light: a STONE roof
+// at y 200 over z = 1 and x in {1, 2, 15, 16} puts their edit cells in shade first (sky 14 from
+// the side), so an edit there leaves every other cell's light as it was and dirties only the
+// chunks the block borders, as in M1. The roof's own meshes are settled and discarded.
+void roof_over_edits(World& w, ChunkManager& m) {
+    for (int x : {1, 2, 15, 16}) w.set(x, 200, 1, blk::STONE);
+    m.settle(ColumnPos{0, 0});
+    m.take_meshes(SIZE_MAX);
+}
+
 }  // namespace
 
 TEST(test_mesh_result_current) {
@@ -145,6 +157,7 @@ TEST(test_manager_one_job_per_edit) {
     ChunkManager m(w, pool, nullptr, 2);
     m.settle(ColumnPos{0, 0});
     m.take_meshes(SIZE_MAX);
+    roof_over_edits(w, m);
     Blocker blocker(pool);
     CHECK(w.set(1, 100, 1, blk::STONE));
     m.update(ColumnPos{0, 0});
@@ -198,6 +211,7 @@ TEST(test_manager_flush_edits) {
     ChunkManager m(w, pool, nullptr, 2);
     m.settle(ColumnPos{0, 0});
     m.take_meshes(SIZE_MAX);
+    roof_over_edits(w, m);
     CHECK(w.set(1, 100, 1, blk::STONE));
     const uint32_t v = w.chunk(ChunkPos{0, 6, 0})->version;
     m.flush_edits();
@@ -236,6 +250,7 @@ TEST(test_manager_flush_edits_border_updates_both_chunks) {
     ChunkManager m(w, pool, nullptr, 2);
     m.settle(ColumnPos{0, 0});
     m.take_meshes(SIZE_MAX);
+    roof_over_edits(w, m);
     CHECK(w.set(15, 100, 1, blk::STONE));  // borders column (1,0)
     m.flush_edits();
     const std::vector<MeshResult> meshes = m.take_meshes(SIZE_MAX);
@@ -262,6 +277,7 @@ TEST(test_manager_async_remesh_on_edit) {
     ChunkManager m(w, pool, nullptr, 2);
     m.settle(ColumnPos{0, 0});
     m.take_meshes(SIZE_MAX);
+    roof_over_edits(w, m);
     CHECK(w.set(1, 100, 1, blk::STONE));
     const uint32_t v = w.chunk(ChunkPos{0, 6, 0})->version;
     m.settle(ColumnPos{0, 0});
@@ -278,6 +294,7 @@ TEST(test_manager_reschedules_outdated_mesh) {
     ChunkManager m(w, pool, nullptr, 2);
     m.settle(ColumnPos{0, 0});
     m.take_meshes(SIZE_MAX);
+    roof_over_edits(w, m);
     Blocker blocker(pool);
     CHECK(w.set(1, 100, 1, blk::STONE));
     m.update(ColumnPos{0, 0});  // queues a mesh job behind the blocker
@@ -304,6 +321,7 @@ TEST(test_manager_older_mesh_job_never_wins) {
     ChunkManager m(w, pool, nullptr, 2);
     m.settle(ColumnPos{0, 0});
     m.take_meshes(SIZE_MAX);
+    roof_over_edits(w, m);
     Blocker blocker(pool);
     CHECK(w.set(15, 100, 1, blk::STONE));
     m.update(ColumnPos{0, 0});  // job A
@@ -498,4 +516,23 @@ TEST(test_manager_unmodified_columns_not_saved) {
         ++files;
     }
     CHECK(files == 0);
+}
+
+// M3 Task 3: a column meshes once its 4 side neighbors are loaded, but its corner vertices also
+// read the diagonal columns. When a diagonal arrives later, the meshed column's non-empty chunks
+// are meshed again; its empty chunks (no faces either way) are not.
+TEST(test_manager_remeshes_on_diagonal_arrival) {
+    World w(1);
+    ThreadPool pool(2);
+    ChunkManager m(w, pool, nullptr, 1);
+    m.settle(ColumnPos{0, 0});  // (0,0) and its 4 side neighbors; diagonal (1,1) is outside rd 1
+    CHECK(!w.column_loaded(ColumnPos{1, 1}));
+    m.take_meshes(SIZE_MAX);
+    m.settle(ColumnPos{1, 0});  // loads (1,1) and (1,-1), diagonals of (0,0)
+    CHECK(w.column_loaded(ColumnPos{1, 1}));
+    const std::vector<MeshResult> meshes = m.take_meshes(SIZE_MAX);
+    CHECK(has_mesh(meshes, ChunkPos{0, 0, 0}));    // DEEPSTONE: never empty
+    CHECK(!has_mesh(meshes, ChunkPos{0, 15, 0}));  // empty sky chunk
+    for (const MeshResult& r : meshes)
+        if (r.pos.x == 0 && r.pos.z == 0) CHECK(!w.chunk(r.pos)->is_empty());
 }

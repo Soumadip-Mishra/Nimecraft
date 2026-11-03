@@ -7,6 +7,7 @@
 #include "rlgl.h"
 
 #include <algorithm>
+#include <cmath>
 #include <cstddef>
 #include <cstdint>
 #include <cstdlib>
@@ -22,6 +23,11 @@ constexpr int ATLAS_PX = ATLAS_TILES * TILE_PX;  // 128
 
 constexpr float FOG_START_FRACTION = 0.7f;
 constexpr float CUTOUT_ALPHA = 0.5f;  // Opaque and Cutout layers discard texels below this
+
+// Sun and moon: discs SKY_DISTANCE from the eye (inside the default far plane of 1000).
+constexpr float SKY_DISTANCE = 400.f, SUN_RADIUS = 26.f, MOON_RADIUS = 18.f;
+constexpr int SKY_SEGMENTS = 24;
+constexpr Color SUN_COLOR{255, 244, 196, 255}, SUN_HALO{255, 214, 140, 70}, MOON_COLOR{214, 222, 240, 255};
 
 // Chunk shader, GLSL 330. Meshes are drawn with an identity model matrix, so vertexPosition is the
 // world position the fog distance is measured from.
@@ -52,9 +58,13 @@ uniform vec3 fogColor;
 uniform float fogStart;
 uniform float fogEnd;
 uniform float alphaCutoff;
+uniform float daylight;
 out vec4 finalColor;
 void main() {
-    vec4 c = texture(texture0, fragTexCoord) * colDiffuse * fragColor;
+    // fragColor: r sky light, g block light (both 0..1), b face shade * ambient occlusion.
+    vec4 tex = texture(texture0, fragTexCoord) * colDiffuse;
+    float light = max(fragColor.r * daylight, fragColor.g);
+    vec4 c = vec4(tex.rgb * fragColor.b * (0.06 + 0.94 * pow(light, 1.6)), tex.a);
     if (c.a < alphaCutoff) discard;
     float d = length(fragWorld.xz - camPos.xz);
     float f = clamp((d - fogStart) / (fogEnd - fogStart), 0.0, 1.0);
@@ -101,7 +111,9 @@ constexpr Rgb GRASS{96, 158, 56}, DIRT{128, 92, 62}, STONE{122, 124, 128}, SAND{
               SPINE{220, 214, 170}, PINE_BARK{72, 52, 38}, PINE_WOOD{168, 136, 92},
               PINE_LEAF{36, 84, 56}, PETAL{208, 76, 118}, POLLEN{236, 198, 64}, QUARTZ{230, 224, 236},
               COAL{38, 38, 42}, COPPER{198, 112, 62}, TIN{190, 196, 204}, IRON{206, 164, 132},
-              SILVER{232, 238, 246};
+              SILVER{232, 238, 246}, FLAME{238, 136, 40}, FLAME_CORE{255, 240, 170},
+              IRON_FRAME{58, 58, 64}, GLOW{246, 186, 92}, STEM{214, 210, 190}, GLOWCAP_TEAL{64, 196, 180},
+              SPOT{200, 255, 240};
 constexpr Rgb CLEAR{0, 0, 0, 0};
 constexpr int WATER_ALPHA = 170, ICE_ALPHA = 200;
 
@@ -231,6 +243,32 @@ Rgb tile_pixel(int t, int x, int y) {
         if ((x + y) % 6 == 0) return shade(QUARTZ, 82);
         return noisy((x - y + 16) % 6 == 0 ? shade(QUARTZ, 110) : QUARTZ, x, y, salt, 3);
     }
+    case T_TORCH: {
+        // A short wooden stick with a flame on top: white-yellow core, orange rim.
+        if ((x == 7 || x == 8) && y >= 7) return noisy(WOOD, x, y, salt, 8);
+        const int d = std::abs(2 * x - 15) + std::abs(2 * y - 9);  // around (7.5, 4.5)
+        if (d <= 2) return FLAME_CORE;
+        if (d <= 5 && y >= 2) return noisy(FLAME, x, y, salt, 6);
+        return CLEAR;
+    }
+    case T_LANTERN: {
+        // Dark iron frame and bars around warm glowing glass, with cut corners.
+        if ((x <= 1 || x >= 14) && (y <= 1 || y >= 14)) return CLEAR;
+        const bool frame = x <= 1 || x >= 14 || y <= 1 || y >= 14 || x == 7 || x == 8;
+        if (frame) return noisy(IRON_FRAME, x, y, salt, 6);
+        const int d = std::abs(2 * y - 15);
+        return noisy(shade(GLOW, 112 - d * 2), x, y, salt, 4);
+    }
+    case T_GLOWCAP: {
+        // A pale stem under a teal cap with bright spots.
+        if ((x == 7 || x == 8) && y >= 9) return noisy(STEM, x, y, salt, 5);
+        const int dx = 2 * x - 15, dy = 2 * y - 17;  // cap centred at (7.5, 8.5), drawn above y 9
+        if (y <= 8 && dx * dx + 4 * dy * dy <= 144) {
+            if (pixel_hash(x, y, salt + 3) % 7 == 0) return SPOT;
+            return noisy(GLOWCAP_TEAL, x, y, salt, 8);
+        }
+        return CLEAR;
+    }
     default: return Rgb{255, 0, 255};  // unused atlas cell
     }
 }
@@ -299,6 +337,32 @@ FogRange fog_range(int rd) {
     return FogRange{FOG_START_FRACTION * end, end};
 }
 
+Vector3 sun_direction(float angle) {
+    return Vector3{std::cos(angle), std::sin(angle), 0.f};
+}
+
+std::vector<Vector3> sky_disc(Vector3 eye, Vector3 dir, float distance, float radius, int segments) {
+    segments = std::max(3, segments);
+    const Vector3 c = Vector3Add(eye, Vector3Scale(dir, distance));
+    // u and v span the disc plane; u x v = -dir, so increasing angle runs counter-clockwise as seen
+    // from the eye.
+    const Vector3 ref = std::abs(dir.y) < 0.9f ? Vector3{0, 1, 0} : Vector3{1, 0, 0};
+    const Vector3 u = Vector3Normalize(Vector3CrossProduct(dir, ref));
+    const Vector3 v = Vector3CrossProduct(u, dir);
+    auto rim = [&](int i) {
+        const float a = 2.f * PI * static_cast<float>(i) / static_cast<float>(segments);
+        return Vector3Add(c, Vector3Add(Vector3Scale(u, radius * std::cos(a)), Vector3Scale(v, radius * std::sin(a))));
+    };
+    std::vector<Vector3> out;
+    out.reserve(static_cast<std::size_t>(segments) * 3);
+    for (int i = 0; i < segments; ++i) {
+        out.push_back(c);
+        out.push_back(rim(i));
+        out.push_back(rim(i + 1));
+    }
+    return out;
+}
+
 void Renderer::init() {
     const Image atlas = generate_atlas();
     const Texture2D tex = LoadTextureFromImage(atlas);
@@ -316,6 +380,7 @@ void Renderer::init() {
         loc_fog_start_ = GetShaderLocation(shader, "fogStart");
         loc_fog_end_ = GetShaderLocation(shader, "fogEnd");
         loc_cutoff_ = GetShaderLocation(shader, "alphaCutoff");
+        loc_daylight_ = GetShaderLocation(shader, "daylight");
     } else {
         MemFree(shader.locs);
         TraceLog(LOG_WARNING, "nimecraft: chunk shader failed; drawing without fog or cutout");
@@ -326,6 +391,29 @@ void Renderer::init() {
 void Renderer::set_fog(FogRange range, Color sky) {
     fog_ = range;
     sky_ = sky;
+}
+
+void Renderer::set_daylight(float daylight) {
+    daylight_ = daylight;
+}
+
+void Renderer::draw_sky(const Camera3D& cam, float sun_angle) {
+    const Vector3 sun = sun_direction(sun_angle);
+    const Vector3 moon{-sun.x, -sun.y, -sun.z};
+    auto disc = [&cam](Vector3 dir, float radius, Color c) {
+        if (dir.y < -0.25f) return;  // well below the horizon
+        const std::vector<Vector3> tri = sky_disc(cam.position, dir, SKY_DISTANCE, radius, SKY_SEGMENTS);
+        for (std::size_t i = 0; i + 2 < tri.size(); i += 3) DrawTriangle3D(tri[i], tri[i + 1], tri[i + 2], c);
+    };
+    rlDrawRenderBatchActive();
+    rlDisableDepthMask();
+    BeginBlendMode(BLEND_ALPHA);
+    disc(sun, SUN_RADIUS * 1.6f, SUN_HALO);
+    disc(sun, SUN_RADIUS, SUN_COLOR);
+    disc(moon, MOON_RADIUS, MOON_COLOR);
+    EndBlendMode();
+    rlDrawRenderBatchActive();
+    rlEnableDepthMask();
 }
 
 void Renderer::upload(ChunkPos p, const ChunkMesh& m) {
@@ -374,6 +462,7 @@ int Renderer::draw(const Camera3D& cam, float aspect) {
     }
     set_float(loc_fog_start_, fog_.start);
     set_float(loc_fog_end_, fog_.end);
+    set_float(loc_daylight_, daylight_);
 
     // Opaque and Cutout: depth-tested and depth-writing, texels below CUTOUT_ALPHA discarded.
     set_float(loc_cutoff_, CUTOUT_ALPHA);

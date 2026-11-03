@@ -151,9 +151,12 @@ TEST(test_world_set_marks_all_six_neighbors) {
         w.insert_column(c, air_column(c));
     w.take_dirty();
 
+    // M3 Task 3: smooth light and AO read edge and corner cells of the padded snapshot, so every
+    // loaded chunk whose 18^3 snapshot holds the cell is dirty, diagonals included. Here the
+    // diagonal columns (-1,-1), (1,1), ... are unloaded, so the X-Z diagonals stay out.
     CHECK(w.set(0, 16, 0, blk::DIRT));  // local (0,0,0): -X, -Y, -Z
-    CHECK(same_set(w.take_dirty(),
-                   {ChunkPos{0, 1, 0}, ChunkPos{-1, 1, 0}, ChunkPos{0, 0, 0}, ChunkPos{0, 1, -1}}));
+    CHECK(same_set(w.take_dirty(), {ChunkPos{0, 1, 0}, ChunkPos{-1, 1, 0}, ChunkPos{0, 0, 0}, ChunkPos{0, 1, -1},
+                                    ChunkPos{-1, 0, 0}, ChunkPos{0, 0, -1}}));
     // Neighbors only need a new mesh; their blocks did not change, so they are not modified.
     const Chunk* nb = w.chunk(ChunkPos{-1, 1, 0});
     CHECK(nb != nullptr);
@@ -163,8 +166,8 @@ TEST(test_world_set_marks_all_six_neighbors) {
     }
 
     CHECK(w.set(15, 31, 15, blk::DIRT));  // local (15,15,15): +X, +Y, +Z
-    CHECK(same_set(w.take_dirty(),
-                   {ChunkPos{0, 1, 0}, ChunkPos{1, 1, 0}, ChunkPos{0, 2, 0}, ChunkPos{0, 1, 1}}));
+    CHECK(same_set(w.take_dirty(), {ChunkPos{0, 1, 0}, ChunkPos{1, 1, 0}, ChunkPos{0, 2, 0}, ChunkPos{0, 1, 1},
+                                    ChunkPos{1, 2, 0}, ChunkPos{0, 2, 1}}));
 
     CHECK(w.set(8, 24, 8, blk::DIRT));  // interior: own chunk only
     CHECK(same_set(w.take_dirty(), {ChunkPos{0, 1, 0}}));
@@ -367,4 +370,20 @@ TEST(test_world_far_coordinates) {
     CHECK(c != nullptr);
     if (c != nullptr) CHECK(c->get(0, 4, 0) == blk::SAND);
     CHECK(w.get(999999, 100, -1000000) == blk::AIR);  // column 62499 is not loaded
+}
+
+// M3 Task 3: an edit at a chunk corner dirties all 8 chunks around the corner when they are
+// loaded (AO and smooth light read diagonal cells); an edge cell up to 4.
+TEST(test_world_set_marks_diagonal_neighbors) {
+    World w(1);
+    for (int cx = -1; cx <= 1; ++cx)
+        for (int cz = -1; cz <= 1; ++cz) w.insert_column(ColumnPos{cx, cz}, air_column(ColumnPos{cx, cz}));
+    w.take_dirty();
+    CHECK(w.set(15, 31, 15, blk::DIRT));
+    CHECK(same_set(w.take_dirty(), {ChunkPos{0, 1, 0}, ChunkPos{1, 1, 0}, ChunkPos{0, 2, 0}, ChunkPos{0, 1, 1},
+                                    ChunkPos{1, 2, 0}, ChunkPos{0, 2, 1}, ChunkPos{1, 1, 1}, ChunkPos{1, 2, 1}}));
+    // Local (0, 8, 0) of chunk {-1,1,0}: the -X, -Z edge. Column (-2, *) is unloaded, so only
+    // the -Z neighbor joins.
+    CHECK(w.set(-16, 24, 0, blk::DIRT));
+    CHECK(same_set(w.take_dirty(), {ChunkPos{-1, 1, 0}, ChunkPos{-1, 1, -1}}));
 }

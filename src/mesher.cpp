@@ -59,8 +59,18 @@ struct Normal {
     float x, y, z;
 };
 
+constexpr int AO_PERCENT[4] = {55, 70, 85, 100};  // by AO level 0..3
+constexpr int LIGHT_SCALE = 17;                   // light 0..15 -> color 0..255
+
+// One vertex color: R sky, G block, B shade * AO; ao is the level 0..3 (for the quad split).
+struct VertexColor {
+    uint8_t r, g, b;
+    int ao;
+};
+
 // One quad at block (bx, by, bz). Corner y values are 0 or 1; the 1s are placed at `top`.
-void emit_quad(MeshData& m, const float (&corners)[4][3], Normal n, uint8_t shade, Tile tile,
+// Split along 0-2 unless a0 + a2 > a1 + a3, then along 1-3 (both counter-clockwise).
+void emit_quad(MeshData& m, const float (&corners)[4][3], Normal n, const VertexColor (&color)[4], Tile tile,
                float bx, float by, float bz, float top) {
     const std::size_t base = m.vertex_count();
     const float size = 1.f / static_cast<float>(ATLAS_TILES);
@@ -75,13 +85,58 @@ void emit_quad(MeshData& m, const float (&corners)[4][3], Normal n, uint8_t shad
         m.normals.push_back(n.x);
         m.normals.push_back(n.y);
         m.normals.push_back(n.z);
-        m.colors.push_back(shade);
-        m.colors.push_back(shade);
-        m.colors.push_back(shade);
+        m.colors.push_back(color[c].r);
+        m.colors.push_back(color[c].g);
+        m.colors.push_back(color[c].b);
         m.colors.push_back(255);
     }
-    for (int k : {0, 1, 2, 0, 2, 3})
+    static constexpr int SPLIT_02[6] = {0, 1, 2, 0, 2, 3}, SPLIT_13[6] = {1, 2, 3, 1, 3, 0};
+    const bool flip = color[0].ao + color[2].ao > color[1].ao + color[3].ao;
+    for (int k : flip ? SPLIT_13 : SPLIT_02)
         m.indices.push_back(static_cast<uint32_t>(base + static_cast<std::size_t>(k)));
+}
+
+bool opaque_at(const Padded& pad, int x, int y, int z) {
+    return block_def(pad.at(x, y, z)).opaque;
+}
+
+// Smooth light and AO of face f's corner c on block (lx, ly, lz) (see build_mesh in the header).
+VertexColor vertex_color(const Padded& pad, int lx, int ly, int lz, const FaceSpec& f, int c) {
+    const int d[3] = {f.dx, f.dy, f.dz};
+    const int cell[3] = {lx + f.dx, ly + f.dy, lz + f.dz};  // the face's neighbor cell
+    // The two face axes, and the step toward this corner along each.
+    int axis[2]{}, step[2]{}, k = 0;
+    for (int a = 0; a < 3; ++a) {
+        if (d[a] != 0) continue;
+        axis[k] = a;
+        step[k] = f.corners[c][a] > 0.5f ? 1 : -1;
+        ++k;
+    }
+    int cells[4][3];
+    for (int i = 0; i < 4; ++i)
+        for (int a = 0; a < 3; ++a) cells[i][a] = cell[a];
+    cells[1][axis[0]] += step[0];  // side1
+    cells[2][axis[1]] += step[1];  // side2
+    cells[3][axis[0]] += step[0];  // corner
+    cells[3][axis[1]] += step[1];
+
+    bool opaque[4];
+    int sky = 0, blk_light = 0, count = 0;
+    for (int i = 0; i < 4; ++i) {
+        opaque[i] = opaque_at(pad, cells[i][0], cells[i][1], cells[i][2]);
+        if (opaque[i]) continue;
+        const uint8_t l = pad.light_at(cells[i][0], cells[i][1], cells[i][2]);
+        sky += l >> 4;
+        blk_light += l & 0x0F;
+        ++count;
+    }
+    const int s1 = opaque[1] ? 1 : 0, s2 = opaque[2] ? 1 : 0, corner = opaque[3] ? 1 : 0;
+    const int level = s1 && s2 ? 0 : 3 - (s1 + s2 + corner);
+    auto average = [count](int sum) {
+        return count == 0 ? 0 : (sum * LIGHT_SCALE + count / 2) / count;
+    };
+    return VertexColor{static_cast<uint8_t>(average(sky)), static_cast<uint8_t>(average(blk_light)),
+                       static_cast<uint8_t>((f.shade * AO_PERCENT[level] + 50) / 100), level};
 }
 
 MeshData& layer_mesh(ChunkMesh& cm, Layer layer) {
@@ -104,6 +159,10 @@ std::vector<T> slice(const std::vector<T>& in, std::size_t per, std::size_t firs
 
 BlockId Padded::at(int lx, int ly, int lz) const {
     return b[pad_index(lx, ly, lz)];
+}
+
+uint8_t Padded::light_at(int lx, int ly, int lz) const {
+    return light[pad_index(lx, ly, lz)];
 }
 
 std::size_t MeshData::vertex_count() const {
@@ -130,14 +189,22 @@ Padded snapshot(const World& w, ChunkPos p) {
             const int sz = side_of(lz);
             for (int lx = -1; lx <= CHUNK; ++lx) {
                 BlockId id = blk::AIR;
+                uint8_t light = 0;
                 if (wy < 0) {
                     id = blk::DEEPSTONE;
-                } else if (wy < WORLD_HEIGHT) {
+                } else if (wy >= WORLD_HEIGHT) {
+                    light = 0xF0;  // open sky above the world
+                } else {
                     const int sx = side_of(lx);
                     const Chunk* c = around[sy + 1][sz + 1][sx + 1];
-                    if (c != nullptr) id = c->get(lx - sx * CHUNK, ly - sy * CHUNK, lz - sz * CHUNK);
+                    if (c != nullptr) {
+                        const int i = Chunk::index(lx - sx * CHUNK, ly - sy * CHUNK, lz - sz * CHUNK);
+                        id = c->blocks[static_cast<std::size_t>(i)];
+                        light = c->light[static_cast<std::size_t>(i)];
+                    }
                 }
                 pad.b[pad_index(lx, ly, lz)] = id;
+                pad.light[pad_index(lx, ly, lz)] = light;
             }
         }
     }
@@ -157,9 +224,12 @@ ChunkMesh build_mesh(const Padded& pad, ChunkPos p) {
                 const float bx = static_cast<float>(ox + lx), by = static_cast<float>(oy + ly),
                             bz = static_cast<float>(oz + lz);
                 if (def.shape == Shape::Cross) {
+                    const uint8_t l = pad.light_at(lx, ly, lz);
+                    const VertexColor own{static_cast<uint8_t>((l >> 4) * LIGHT_SCALE),
+                                          static_cast<uint8_t>((l & 0x0F) * LIGHT_SCALE), SHADE_X, 3};
+                    const VertexColor colors[4] = {own, own, own, own};
                     for (const CrossSpec& q : CROSS)
-                        emit_quad(m, q.corners, Normal{q.nx, 0.f, q.nz}, SHADE_X, def.tiles[PX], bx,
-                                  by, bz, 1.f);
+                        emit_quad(m, q.corners, Normal{q.nx, 0.f, q.nz}, colors, def.tiles[PX], bx, by, bz, 1.f);
                     continue;
                 }
                 const bool translucent = def.layer == Layer::Translucent;
@@ -171,7 +241,9 @@ ChunkMesh build_mesh(const Padded& pad, ChunkPos p) {
                     if (block_def(n).opaque || (translucent && n == id)) continue;
                     const Normal normal{static_cast<float>(spec.dx), static_cast<float>(spec.dy),
                                         static_cast<float>(spec.dz)};
-                    emit_quad(m, spec.corners, normal, spec.shade, def.tiles[f], bx, by, bz, top);
+                    VertexColor colors[4];
+                    for (int c = 0; c < 4; ++c) colors[c] = vertex_color(pad, lx, ly, lz, spec, c);
+                    emit_quad(m, spec.corners, normal, colors, def.tiles[f], bx, by, bz, top);
                 }
             }
     return out;

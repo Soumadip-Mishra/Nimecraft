@@ -2,12 +2,16 @@
 #include "block.hpp"
 #include "chunk.hpp"
 #include "coords.hpp"
+#include "light.hpp"
 #include "mesher.hpp"
 #include "test.hpp"
 #include "world.hpp"
 
 #include <cstddef>
 #include <cstdint>
+#include <functional>
+#include <initializer_list>
+#include <memory>
 #include <thread>
 #include <vector>
 
@@ -76,6 +80,51 @@ int face_of(V3 n) {
     if (n.z > 0.5f) return PZ;
     return NZ;
 }
+
+// ---- M3 Task 3 helpers ----
+
+using Gen = std::function<BlockId(int x, int y, int z)>;
+
+// Columns (-1..1, -1..1) built from gen, lit as ChunkManager lights them (compute, then stitch).
+World lit_world(const Gen& gen) {
+    World w(1);
+    for (int cx = -1; cx <= 1; ++cx)
+        for (int cz = -1; cz <= 1; ++cz) {
+            Column col;
+            for (int cy = 0; cy < SECTIONS; ++cy) {
+                auto ch = std::make_unique<Chunk>();
+                for (int ly = 0; ly < CHUNK; ++ly)
+                    for (int lz = 0; lz < CHUNK; ++lz)
+                        for (int lx = 0; lx < CHUNK; ++lx)
+                            ch->blocks[static_cast<std::size_t>(Chunk::index(lx, ly, lz))] =
+                                gen(cx * CHUNK + lx, cy * CHUNK + ly, cz * CHUNK + lz);
+                col[static_cast<std::size_t>(cy)] = std::move(ch);
+            }
+            compute_column_light(col);
+            w.insert_column(ColumnPos{cx, cz}, std::move(col));
+            stitch_column_light(w, ColumnPos{cx, cz});
+        }
+    return w;
+}
+
+BlockId flat_ground(int, int y, int) {
+    return y <= 64 ? blk::STONE : blk::AIR;
+}
+
+// Index of the vertex at (x, y, z) whose normal is n, or SIZE_MAX.
+std::size_t vertex_at(const MeshData& m, V3 p, V3 n) {
+    for (std::size_t i = 0; i < m.vertex_count(); ++i) {
+        const V3 q = pos_at(m, i), nn = normal_at(m, i);
+        if (q.x == p.x && q.y == p.y && q.z == p.z && nn.x == n.x && nn.y == n.y && nn.z == n.z) return i;
+    }
+    return SIZE_MAX;
+}
+
+uint8_t channel(const MeshData& m, std::size_t v, int c) {
+    return v == SIZE_MAX ? 0 : m.colors[v * 4 + static_cast<std::size_t>(c)];
+}
+
+constexpr V3 UP{0.f, 1.f, 0.f};
 
 }  // namespace
 
@@ -205,24 +254,26 @@ TEST(test_mesh_shade_and_uv) {
     int top = 0, bottom = 0;
     for (std::size_t i = 0; i < m.vertex_count(); ++i) {
         const V3 n = normal_at(m, i);
-        const uint8_t r = m.colors[i * 4], g = m.colors[i * 4 + 1], b = m.colors[i * 4 + 2],
+        const uint8_t r = m.colors[i * 4], g = m.colors[i * 4 + 1], shade = m.colors[i * 4 + 2],
                       a = m.colors[i * 4 + 3];
-        CHECK(r == g);
-        CHECK(g == b);
+        // M3 Task 3: R and G carry sky and block light (none in this unlit world), B the face
+        // shade times ambient occlusion (no occluders here).
+        CHECK(r == 0);
+        CHECK(g == 0);
         CHECK(a == 255);
         const float u = m.texcoords[i * 2], v = m.texcoords[i * 2 + 1];
         if (n.y > 0.5f) {
             ++top;
-            CHECK(r == 255);
+            CHECK(shade == 255);
             CHECK(u >= 0.f && u <= 0.125f);
             CHECK(v >= 0.f && v <= 0.125f);
         } else if (n.y < -0.5f) {
             ++bottom;
-            CHECK(r == 128);
+            CHECK(shade == 128);
         } else if (n.x != 0.f) {
-            CHECK(r == 204);
+            CHECK(shade == 204);
         } else {
-            CHECK(r == 166);
+            CHECK(shade == 166);
         }
     }
     CHECK(top == 4);
@@ -732,4 +783,236 @@ TEST(test_split_mesh_boundaries) {
         CHECK(q.vertex_count() == 4);
         CHECK(q.indices == (std::vector<uint32_t>{0, 1, 2, 0, 2, 3}));
     }
+}
+
+// ---- M3 Task 3: smooth light and ambient occlusion ----
+
+TEST(test_mesh_vertex_light_channels) {
+    {
+        // A fully sky-lit flat top: every vertex R 255, G 0.
+        const World w = lit_world(flat_ground);
+        const MeshData m = mesh_of(w, ChunkPos{0, 4, 0});
+        int tops = 0;
+        for (std::size_t i = 0; i < m.vertex_count(); ++i) {
+            if (normal_at(m, i).y < 0.5f) continue;
+            ++tops;
+            CHECK(m.colors[i * 4] == 255);
+            CHECK(m.colors[i * 4 + 1] == 0);
+            CHECK(m.colors[i * 4 + 2] == 255);
+            CHECK(m.colors[i * 4 + 3] == 255);
+        }
+        CHECK(tops == 256 * 4);
+    }
+    {
+        // The same top in a dark room (air x 6..10, y 65..67, z 6..10 in solid STONE) lit only by
+        // a torch 2 cells above block (8, 64, 8): around each vertex of its top the 4 cells hold
+        // 13, 12, 12, 11 -> G = 12 * 17; no sky light -> R = 0.
+        World w = lit_world([](int x, int y, int z) {
+            const bool room = x >= 6 && x <= 10 && y >= 65 && y <= 67 && z >= 6 && z <= 10;
+            return y <= 80 && !room ? blk::STONE : blk::AIR;
+        });
+        CHECK(w.set(8, 66, 8, blk::TORCH));
+        const MeshData m = mesh_of(w, ChunkPos{0, 4, 0});
+        for (V3 p : {V3{8, 65, 8}, V3{9, 65, 8}, V3{8, 65, 9}, V3{9, 65, 9}}) {
+            const std::size_t v = vertex_at(m, p, UP);
+            CHECK(v != SIZE_MAX);
+            CHECK(channel(m, v, 0) == 0);
+            CHECK(channel(m, v, 1) == 12 * 17);
+            CHECK(channel(m, v, 2) == 255);
+        }
+    }
+}
+
+TEST(test_mesh_light_ignores_opaque_cells) {
+    // Vertex (9, 65, 9) of the top of (8, 64, 8): cell (9, 65, 9) is STONE, the other 3 have sky
+    // 15 -> R 255, not 3 * 255 / 4.
+    World w = lit_world(flat_ground);
+    CHECK(w.set(9, 65, 9, blk::STONE));
+    const MeshData m = mesh_of(w, ChunkPos{0, 4, 0});
+    const std::size_t v = vertex_at(m, V3{9, 65, 9}, UP);
+    CHECK(v != SIZE_MAX);
+    // The vertex is shared by 3 tops; each samples the same 4 cells.
+    for (std::size_t i = 0; i < m.vertex_count(); ++i) {
+        const V3 p = pos_at(m, i);
+        if (p.x == 9.f && p.y == 65.f && p.z == 9.f && normal_at(m, i).y > 0.5f) CHECK(m.colors[i * 4] == 255);
+    }
+    CHECK(channel(m, v, 0) == 255);
+}
+
+TEST(test_mesh_ao_levels) {
+    // The top of a lone block at (8, 70, 8); its vertex (9, 71, 9) has sides (9, 71, 8) and
+    // (8, 71, 9) and corner (9, 71, 9). B = 255 * {0.55, 0.7, 0.85, 1.0}[level], rounded.
+    struct Case {
+        std::vector<V3> occluders;
+        int b;
+    };
+    const Case cases[] = {
+        {{}, 255},
+        {{V3{9, 71, 9}}, 217},                            // corner only: 0.85 * 255 = 216.75
+        {{V3{9, 71, 8}}, 217},                            // one side only
+        {{V3{8, 71, 9}}, 217},                            // the other side only
+        {{V3{9, 71, 8}, V3{9, 71, 9}}, 179},              // one side + corner: 0.7 * 255 = 178.5
+        {{V3{9, 71, 8}, V3{8, 71, 9}}, 140},              // two sides: 0.55 * 255 = 140.25
+        {{V3{9, 71, 8}, V3{8, 71, 9}, V3{9, 71, 9}}, 140},  // two sides + corner
+    };
+    for (const Case& c : cases) {
+        World w = air_world();
+        w.set(8, 70, 8, blk::STONE);
+        for (V3 o : c.occluders) w.set(static_cast<int>(o.x), static_cast<int>(o.y), static_cast<int>(o.z), blk::STONE);
+        const MeshData m = mesh_of(w, ChunkPos{0, 4, 0});
+        const std::size_t v = vertex_at(m, V3{9, 71, 9}, UP);
+        CHECK(v != SIZE_MAX);
+        CHECK(channel(m, v, 2) == c.b);
+        // The opposite vertex (8, 71, 8) sees none of these occluders.
+        CHECK(channel(m, vertex_at(m, V3{8, 71, 8}, UP), 2) == 255);
+    }
+    {
+        // Non-opaque neighbors (leaves, a plant, water) do not occlude.
+        World w = air_world();
+        w.set(8, 70, 8, blk::STONE);
+        w.set(9, 71, 8, blk::LEAVES);
+        w.set(8, 71, 9, blk::TALL_GRASS);
+        w.set(9, 71, 9, blk::WATER);
+        const MeshData m = mesh_of(w, ChunkPos{0, 4, 0});
+        CHECK(channel(m, vertex_at(m, V3{9, 71, 9}, UP), 2) == 255);
+    }
+    {
+        // Side faces scale their own shade. The +X face of the block has face cell (9, 70, 8); its
+        // vertex (9, 71, 9) has sides (9, 71, 8) and (9, 70, 9) and corner (9, 71, 9). STONE at
+        // (9, 71, 8) is one side: 0.85 * 204 = 173.4 -> 173. Vertex (9, 70, 9) sees nothing.
+        World w = air_world();
+        w.set(8, 70, 8, blk::STONE);
+        w.set(9, 71, 8, blk::STONE);
+        const MeshData m = mesh_of(w, ChunkPos{0, 4, 0});
+        const std::size_t v = vertex_at(m, V3{9, 71, 9}, V3{1, 0, 0});
+        CHECK(v != SIZE_MAX);
+        CHECK(channel(m, v, 2) == 173);
+        CHECK(channel(m, vertex_at(m, V3{9, 70, 9}, V3{1, 0, 0}), 2) == 204);
+    }
+}
+
+TEST(test_mesh_ao_across_chunk_border) {
+    {
+        // Block (15, 70, 8) in chunk {0,4,0}; its top vertex (16, 71, 9) has side (16, 71, 8) in
+        // chunk {1,4,0}.
+        World w = air_world();
+        w.set(15, 70, 8, blk::STONE);
+        const MeshData m0 = mesh_of(w, ChunkPos{0, 4, 0});
+        CHECK(channel(m0, vertex_at(m0, V3{16, 71, 9}, UP), 2) == 255);
+        w.set(16, 71, 8, blk::STONE);
+        const MeshData m = mesh_of(w, ChunkPos{0, 4, 0});
+        CHECK(channel(m, vertex_at(m, V3{16, 71, 9}, UP), 2) == 217);
+    }
+    {
+        // The diagonal chunk {1,4,1}: corner (16, 71, 16) of block (15, 70, 15).
+        World w = air_world();
+        w.set(15, 70, 15, blk::STONE);
+        w.set(16, 71, 16, blk::STONE);
+        const MeshData m = mesh_of(w, ChunkPos{0, 4, 0});
+        CHECK(channel(m, vertex_at(m, V3{16, 71, 16}, UP), 2) == 217);
+    }
+    {
+        // Vertically: block (8, 79, 8) at the top of section 4, occluder (9, 80, 8) in section 5.
+        World w = air_world();
+        w.set(8, 79, 8, blk::STONE);
+        w.set(9, 80, 8, blk::STONE);
+        const MeshData m = mesh_of(w, ChunkPos{0, 4, 0});
+        CHECK(channel(m, vertex_at(m, V3{9, 80, 9}, UP), 2) == 217);
+    }
+    {
+        // Negative side: block (0, 70, 0); occluder (-1, 71, -1) in chunk {-1,4,-1}.
+        World w = air_world();
+        w.set(0, 70, 0, blk::STONE);
+        w.set(-1, 71, -1, blk::STONE);
+        const MeshData m = mesh_of(w, ChunkPos{0, 4, 0});
+        CHECK(channel(m, vertex_at(m, V3{0, 71, 0}, UP), 2) == 217);
+    }
+}
+
+TEST(test_mesh_quad_flip) {
+    // The top of (8, 70, 8) lists v0 (8,71,8), v1 (8,71,9), v2 (9,71,9), v3 (9,71,8). Corner
+    // occluders at (7, 71, 9) and (9, 71, 7) darken v1 and v3 only: a0 + a2 = 6 > a1 + a3 = 4, so
+    // the quad splits along v1-v3. The mirror pattern, (7, 71, 7) and (9, 71, 9), darkens v0 and
+    // v2 and keeps the v0-v2 split.
+    auto shared_edge = [](std::initializer_list<V3> occluders) {
+        World w = air_world();
+        w.set(8, 70, 8, blk::STONE);
+        for (V3 o : occluders) w.set(static_cast<int>(o.x), static_cast<int>(o.y), static_cast<int>(o.z), blk::STONE);
+        const MeshData m = mesh_of(w, ChunkPos{0, 4, 0});
+        const std::size_t v0 = vertex_at(m, V3{8, 71, 8}, UP);
+        CHECK(v0 != SIZE_MAX && v0 % 4 == 0);
+        const std::size_t q = v0 / 4;
+        // The two corners both triangles use.
+        int uses[4] = {};
+        for (std::size_t k = 0; k < 6; ++k) ++uses[m.indices[q * 6 + k] - v0];
+        int edge = 0;
+        for (int c = 0; c < 4; ++c)
+            if (uses[c] == 2) edge |= 1 << c;
+        // The triangles stay counter-clockwise from above (+Y).
+        for (std::size_t t = 0; t < 2; ++t) {
+            const V3 a = pos_at(m, m.indices[q * 6 + t * 3]), b = pos_at(m, m.indices[q * 6 + t * 3 + 1]),
+                     c = pos_at(m, m.indices[q * 6 + t * 3 + 2]);
+            const float cy = (b.z - a.z) * (c.x - a.x) - (b.x - a.x) * (c.z - a.z);
+            CHECK(cy > 0.f);
+        }
+        return edge;
+    };
+    CHECK(shared_edge({}) == 0b0101);                                // v0-v2: the default split
+    CHECK(shared_edge({V3{7, 71, 9}, V3{9, 71, 7}}) == 0b1010);      // flipped to v1-v3
+    CHECK(shared_edge({V3{7, 71, 7}, V3{9, 71, 9}}) == 0b0101);      // mirror: not flipped
+    CHECK(shared_edge({V3{7, 71, 9}}) == 0b1010);                    // a0 + a2 = 6 > 5
+    CHECK(shared_edge({V3{7, 71, 7}}) == 0b0101);                    // 5 > 6 is false
+}
+
+// ---- M3 Task 3: Coverage Checklist additions ----
+
+TEST(test_padded_snapshot_light) {
+    // The snapshot copies light (high nibble sky, low nibble block) from the chunk and its border;
+    // above the world reads sky 15, below it and unloaded columns read 0.
+    World w = lit_world(flat_ground);
+    CHECK(w.set(15, 70, 15, blk::TORCH));
+    const Padded pad = snapshot(w, ChunkPos{0, 4, 0});
+    CHECK(pad.light_at(15, 6, 15) == 0xFE);             // sky 15, torch 14
+    CHECK(pad.light_at(16, 6, 16) == 0xFC);             // diagonal chunk {1,4,1}: d = 2 -> 12
+    CHECK(pad.light_at(15, 0, 15) == 0x00);             // y 64: STONE
+    CHECK(pad.light_at(-1, 16, -1) == 0xF0);            // y 80 in chunk {-1,5,-1}: open sky
+    const Padded top = snapshot(w, ChunkPos{0, 15, 0});
+    CHECK(top.light_at(4, 16, 4) == 0xF0);               // above the world
+    const Padded bottom = snapshot(w, ChunkPos{0, 0, 0});
+    CHECK(bottom.light_at(4, -1, 4) == 0x00);            // below the world
+    const Padded edge = snapshot(w, ChunkPos{1, 4, 0});
+    CHECK(edge.light_at(16, 4, 4) == 0x00);              // unloaded column (2, 0)
+}
+
+TEST(test_mesh_cross_plant_light) {
+    // A plant takes the light of its own cell at every vertex, and the plain SHADE_X (no AO).
+    World w = lit_world(flat_ground);
+    CHECK(w.set(8, 65, 8, blk::TALL_GRASS));
+    CHECK(w.set(9, 65, 8, blk::STONE));  // would occlude a cube face
+    const MeshData m = layers_of(w, ChunkPos{0, 4, 0}).cutout;
+    CHECK(m.vertex_count() == 16);
+    for (std::size_t i = 0; i < m.vertex_count(); ++i) {
+        CHECK(m.colors[i * 4] == 255);
+        CHECK(m.colors[i * 4 + 1] == 0);
+        CHECK(m.colors[i * 4 + 2] == SHADE_X);
+    }
+}
+
+TEST(test_mesh_water_top_light) {
+    // A liquid's lowered top samples the cells above it like a cube top: sky 15 -> R 255.
+    World w = lit_world(flat_ground);
+    CHECK(w.set(8, 65, 8, blk::WATER));
+    const MeshData m = layers_of(w, ChunkPos{0, 4, 0}).translucent;
+    const std::size_t v = vertex_at(m, V3{9, 65.875f, 9}, UP);
+    CHECK(v != SIZE_MAX);
+    CHECK(channel(m, v, 0) == 255);
+    CHECK(channel(m, v, 2) == 255);
+}
+
+TEST(test_mesh_light_average_rounds) {
+    // Sky 15, 15, 15, 14 around a vertex averages 14.75 -> 14.75 * 17 = 250.75, rounded to 251.
+    World w = lit_world(flat_ground);
+    CHECK(w.set(9, 66, 9, blk::STONE));  // shades (9, 65, 9) to 14 from the side
+    const MeshData m = mesh_of(w, ChunkPos{0, 4, 0});
+    CHECK(channel(m, vertex_at(m, V3{9, 65, 9}, UP), 0) == 251);
 }

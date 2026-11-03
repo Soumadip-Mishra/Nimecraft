@@ -24,8 +24,8 @@ TEST(test_block_ids) {
     CHECK(blk::LEAVES == 6);
     CHECK(blk::PLANKS == 7);
     CHECK(blk::DEEPSTONE == 8);
-    CHECK(blk::COUNT == 26);
-    CHECK(T_COUNT == 31);
+    CHECK(blk::COUNT == 29);  // M3 appended TORCH, LANTERN, GLOWCAP
+    CHECK(T_COUNT == 34);
     CHECK(PX == 0 && NX == 1 && PY == 2 && NY == 3 && PZ == 4 && NZ == 5);
 }
 
@@ -50,18 +50,27 @@ TEST(test_block_ids_m2) {
     CHECK(blk::QUARTZ == 25);
 }
 
+// M3 README: the appended light-emitting ids.
+TEST(test_block_ids_m3) {
+    CHECK(blk::TORCH == 26);
+    CHECK(blk::LANTERN == 27);
+    CHECK(blk::GLOWCAP == 28);
+    CHECK(blk::COUNT == 29);
+}
+
 // M2 Task 1: LEAVES and PINE_LEAVES are Cutout, WATER and ICE Translucent, TALL_GRASS and FLOWER
 // Cross plants in Cutout, WATER a Liquid; every other block is an Opaque Cube.
+// M3 Task 1: TORCH and GLOWCAP are Cutout Cross plants, LANTERN a Cutout Cube.
 TEST(test_block_layers_shapes) {
     for (BlockId id = 1; id < blk::COUNT; ++id) {
         const BlockDef& d = block_def(id);
-        const bool cutout = id == blk::LEAVES || id == blk::PINE_LEAVES || id == blk::TALL_GRASS ||
-                            id == blk::FLOWER;
+        const bool cross = id == blk::TALL_GRASS || id == blk::FLOWER || id == blk::TORCH || id == blk::GLOWCAP;
+        const bool cutout = id == blk::LEAVES || id == blk::PINE_LEAVES || id == blk::LANTERN || cross;
         const bool translucent = id == blk::WATER || id == blk::ICE;
         if (cutout) CHECK(d.layer == Layer::Cutout);
         else if (translucent) CHECK(d.layer == Layer::Translucent);
         else CHECK(d.layer == Layer::Opaque);
-        if (id == blk::TALL_GRASS || id == blk::FLOWER) CHECK(d.shape == Shape::Cross);
+        if (cross) CHECK(d.shape == Shape::Cross);
         else if (id == blk::WATER) CHECK(d.shape == Shape::Liquid);
         else CHECK(d.shape == Shape::Cube);
         // Only Opaque-layer blocks hide their neighbors' faces.
@@ -143,12 +152,14 @@ TEST(test_block_defs_complete) {
 
 // M1: "AIR not solid/opaque; all others solid and opaque". M2 adds blocks that are walked through
 // (WATER, TALL_GRASS, FLOWER) and blocks that are seen through (LEAVES, PINE_LEAVES, ICE, and the
-// walk-through ones). DEEPSTONE and WATER are the unbreakable ones.
+// walk-through ones). M3 adds TORCH and GLOWCAP (walk-through) and LANTERN (solid, Cutout, so seen
+// through). DEEPSTONE and WATER are the unbreakable ones.
 TEST(test_block_flags) {
     for (BlockId id = 1; id < blk::COUNT; ++id) {
-        const bool walk_through = id == blk::WATER || id == blk::TALL_GRASS || id == blk::FLOWER;
-        const bool see_through =
-            walk_through || id == blk::LEAVES || id == blk::PINE_LEAVES || id == blk::ICE;
+        const bool walk_through = id == blk::WATER || id == blk::TALL_GRASS || id == blk::FLOWER ||
+                                  id == blk::TORCH || id == blk::GLOWCAP;
+        const bool see_through = walk_through || id == blk::LEAVES || id == blk::PINE_LEAVES ||
+                                 id == blk::ICE || id == blk::LANTERN;
         CHECK(block_def(id).solid == !walk_through);
         CHECK(block_def(id).opaque == !see_through);
         CHECK(block_def(id).breakable == (id != blk::DEEPSTONE && id != blk::WATER));
@@ -160,13 +171,54 @@ TEST(test_block_def_id_boundary) {
     CHECK(&block_def(blk::COUNT) == &block_def(blk::AIR));
     CHECK(&block_def(999) == &block_def(blk::AIR));
     CHECK(&block_def(65535) == &block_def(blk::AIR));
-    CHECK(&block_def(blk::COUNT - 1) == &block_def(blk::QUARTZ));
-    CHECK(&block_def(blk::QUARTZ) != &block_def(blk::AIR));
-    CHECK(block_def(blk::COUNT - 1).solid);
+    CHECK(&block_def(blk::COUNT - 1) == &block_def(blk::GLOWCAP));
+    CHECK(&block_def(blk::GLOWCAP) != &block_def(blk::AIR));
+    CHECK(block_def(blk::COUNT - 1).emission == 7);
 }
 
 TEST(test_block_names_distinct) {
     for (BlockId a = 0; a < blk::COUNT; ++a)
         for (BlockId b = static_cast<BlockId>(a + 1); b < blk::COUNT; ++b)
             CHECK(block_def(a).name != block_def(b).name);
+}
+
+// M3 Task 1: emission TORCH 14, LANTERN 15, GLOWCAP 7, every other block 0; opacity 15 for every
+// opaque block, LEAVES and PINE_LEAVES 1, WATER and ICE 2, every other block 0.
+TEST(test_block_light_props) {
+    CHECK(block_def(blk::TORCH).emission == 14);
+    CHECK(block_def(blk::LANTERN).emission == 15);
+    CHECK(block_def(blk::GLOWCAP).emission == 7);
+    CHECK(block_def(blk::STONE).opacity == 15);
+    CHECK(block_def(blk::LEAVES).opacity == 1);
+    CHECK(block_def(blk::PINE_LEAVES).opacity == 1);
+    CHECK(block_def(blk::WATER).opacity == 2);
+    CHECK(block_def(blk::ICE).opacity == 2);
+    CHECK(block_def(blk::AIR).opacity == 0);
+    CHECK(block_def(blk::TALL_GRASS).opacity == 0);
+    CHECK(block_def(blk::FLOWER).opacity == 0);
+    CHECK(block_def(blk::TORCH).opacity == 0);
+    CHECK(block_def(blk::LANTERN).opacity == 0);
+    CHECK(block_def(blk::GLOWCAP).opacity == 0);
+    for (BlockId id = 0; id < blk::COUNT; ++id) {
+        const BlockDef& d = block_def(id);
+        if (id != blk::TORCH && id != blk::LANTERN && id != blk::GLOWCAP) CHECK(d.emission == 0);
+        if (d.opaque) CHECK(d.opacity == 15);
+        else if (id == blk::LEAVES || id == blk::PINE_LEAVES) CHECK(d.opacity == 1);
+        else if (id == blk::WATER || id == blk::ICE) CHECK(d.opacity == 2);
+        else CHECK(d.opacity == 0);
+        CHECK(d.emission <= 15);
+    }
+    // Unknown ids read as AIR: no light, no opacity.
+    CHECK(block_def(999).emission == 0);
+    CHECK(block_def(999).opacity == 0);
+}
+
+// M3 Task 1: the new blocks' tiles.
+TEST(test_block_defs_m3_tiles) {
+    CHECK(all_tiles(block_def(blk::TORCH), T_TORCH));
+    CHECK(all_tiles(block_def(blk::LANTERN), T_LANTERN));
+    CHECK(all_tiles(block_def(blk::GLOWCAP), T_GLOWCAP));
+    CHECK(block_def(blk::TORCH).breakable);
+    CHECK(block_def(blk::LANTERN).breakable);
+    CHECK(block_def(blk::GLOWCAP).breakable);
 }

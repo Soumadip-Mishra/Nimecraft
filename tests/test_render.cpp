@@ -27,7 +27,8 @@ TEST(test_render_atlas_deterministic) {
     // Task 6's shader discards alpha < 0.5); Translucent tiles are see-through everywhere; every other
     // tile, and every unused cell, is fully opaque.
     for (int t = 0; t < 64; ++t) {
-        const bool cutout = t == T_LEAVES || t == T_PINE_LEAVES || t == T_TALL_GRASS || t == T_FLOWER;
+        const bool cutout = t == T_LEAVES || t == T_PINE_LEAVES || t == T_TALL_GRASS || t == T_FLOWER ||
+                            t == T_TORCH || t == T_LANTERN || t == T_GLOWCAP;  // M3 Task 1
         const bool translucent = t == T_WATER || t == T_ICE;
         int clear = 0, solid = 0, partial = 0;
         for (int y = 0; y < 16; ++y)

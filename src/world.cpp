@@ -1,5 +1,7 @@
 #include "world.hpp"
 
+#include "light.hpp"
+
 #include <cstddef>
 #include <memory>
 #include <utility>
@@ -64,18 +66,20 @@ bool World::set(int x, int y, int z, BlockId b) {
     Chunk* c = chunk(p);
     if (c == nullptr) return false;
     const int lx = floor_mod(x, CHUNK), ly = floor_mod(y, CHUNK), lz = floor_mod(z, CHUNK);
-    if (c->get(lx, ly, lz) == b) return true;
+    const BlockId before = c->get(lx, ly, lz);
+    if (before == b) return true;
 
     c->set(lx, ly, lz, b);
     c->modified = true;
-    dirty_.insert(p);
-    // A block on a chunk face is visible from the chunk across that face: its mesh is stale too.
-    if (lx == 0) mark_dirty_if_loaded(ChunkPos{p.x - 1, p.y, p.z});
-    if (lx == CHUNK - 1) mark_dirty_if_loaded(ChunkPos{p.x + 1, p.y, p.z});
-    if (ly == 0) mark_dirty_if_loaded(ChunkPos{p.x, p.y - 1, p.z});
-    if (ly == CHUNK - 1) mark_dirty_if_loaded(ChunkPos{p.x, p.y + 1, p.z});
-    if (lz == 0) mark_dirty_if_loaded(ChunkPos{p.x, p.y, p.z - 1});
-    if (lz == CHUNK - 1) mark_dirty_if_loaded(ChunkPos{p.x, p.y, p.z + 1});
+    // Every chunk whose mesh snapshot (the chunk plus a 1-cell border) holds the cell is stale:
+    // face culling reads the face neighbors, and ambient occlusion the edge and corner ones too.
+    const int x0 = lx == 0 ? -1 : 0, x1 = lx == CHUNK - 1 ? 1 : 0;
+    const int y0 = ly == 0 ? -1 : 0, y1 = ly == CHUNK - 1 ? 1 : 0;
+    const int z0 = lz == 0 ? -1 : 0, z1 = lz == CHUNK - 1 ? 1 : 0;
+    for (int dy = y0; dy <= y1; ++dy)
+        for (int dz = z0; dz <= z1; ++dz)
+            for (int dx = x0; dx <= x1; ++dx) mark_dirty(ChunkPos{p.x + dx, p.y + dy, p.z + dz});
+    relight_block(*this, x, y, z, before, b);
     return true;
 }
 
@@ -85,6 +89,6 @@ std::vector<ChunkPos> World::take_dirty() {
     return out;
 }
 
-void World::mark_dirty_if_loaded(ChunkPos p) {
+void World::mark_dirty(ChunkPos p) {
     if (chunk(p) != nullptr) dirty_.insert(p);
 }

@@ -13,7 +13,7 @@ constexpr BlockId AIR = 0, GRASS = 1, DIRT = 2, STONE = 3, SAND = 4, LOG = 5, LE
                   DEEPSTONE = 8, WATER = 9, GRAVEL = 10, CLAY = 11, SNOW = 12, ICE = 13,
                   SANDSTONE = 14, CACTUS = 15, PINE_LOG = 16, PINE_LEAVES = 17, TALL_GRASS = 18,
                   FLOWER = 19, COAL_ORE = 20, COPPER_ORE = 21, TIN_ORE = 22, IRON_ORE = 23,
-                  SILVER_ORE = 24, QUARTZ = 25, COUNT = 26;
+                  SILVER_ORE = 24, QUARTZ = 25, TORCH = 26, LANTERN = 27, GLOWCAP = 28, COUNT = 29;
 }
 
 enum Face : uint8_t { PX, NX, PY, NY, PZ, NZ };
@@ -51,6 +51,9 @@ enum Tile : uint8_t {
     T_IRON_ORE,
     T_SILVER_ORE,
     T_QUARTZ,
+    T_TORCH,
+    T_LANTERN,
+    T_GLOWCAP,
     T_COUNT
 };
 
@@ -70,6 +73,10 @@ struct BlockDef {
     std::array<Tile, 6> tiles;  // indexed by Face
     Layer layer = Layer::Opaque;
     Shape shape = Shape::Cube;
+    uint8_t emission = 0;  // block light the block gives off, 0..15
+    // Light a cell of this block takes away: 15 for every opaque block, LEAVES and PINE_LEAVES 1,
+    // WATER and ICE 2, everything else 0.
+    uint8_t opacity = 15;
 };
 
 const BlockDef& block_def(BlockId id);  // ids >= blk::COUNT return the AIR def

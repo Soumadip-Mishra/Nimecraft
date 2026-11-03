@@ -467,7 +467,8 @@ TEST(test_meta_text_format) {
     CHECK(save_meta(tmp.path() / "world.meta", WorldMeta{7u, 0.5f, 70.f, -2.25f, 1.f, -0.5f}));
     const std::vector<uint8_t> bytes = read_bytes(tmp.path() / "world.meta");
     const std::string text(bytes.begin(), bytes.end());
-    CHECK(text == "version=1\nseed=7\npx=0.5\npy=70\npz=-2.25\nyaw=1\npitch=-0.5\n");
+    // M3 Task 4 appends the optional time key (default 6000).
+    CHECK(text == "version=1\nseed=7\npx=0.5\npy=70\npz=-2.25\nyaw=1\npitch=-0.5\ntime=6000\n");
 }
 
 TEST(test_meta_save_failure_reported) {

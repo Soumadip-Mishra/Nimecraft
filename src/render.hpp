@@ -26,15 +26,29 @@ struct FogRange {
 };
 FogRange fog_range(int rd);
 
+// Unit direction from the eye to the sun for world_time's sun_angle: (cos a, sin a, 0), so it rises
+// on the +X horizon, stands overhead at pi/2, and sets on -X. The moon is the opposite direction.
+Vector3 sun_direction(float angle);
+
+// A disc of max(3, segments) triangles (3 vertices each, fanned from the centre) at eye +
+// dir * distance, radius `radius`, in the plane facing the eye, each counter-clockwise seen from
+// the eye. dir is a unit vector.
+std::vector<Vector3> sky_disc(Vector3 eye, Vector3 dir, float distance, float radius, int segments);
+
 class Renderer {
 public:
     void init();                                  // after InitWindow
     void set_fog(FogRange range, Color sky);      // before draw
+    void set_daylight(float daylight);            // before draw: world_time's daylight_at
     void upload(ChunkPos p, const ChunkMesh& m);  // replaces; empty mesh = remove
     void remove(ChunkPos p);
+    // Sun and moon discs at sun_angle, inside BeginMode3D before draw(): no depth writes, so
+    // every chunk drawn afterwards covers them.
+    void draw_sky(const Camera3D& cam, float sun_angle);
     // Opaque, then Cutout (alpha < 0.5 discarded), then Translucent layers of every visible
     // chunk; the Translucent layer is drawn back to front with alpha blending and depth writes
-    // off. Returns chunks drawn after culling.
+    // off. Vertex colors carry light (R sky, G block, B shade * AO, see mesher.hpp); the shader
+    // lights each texel by max(sky * daylight, block). Returns chunks drawn after culling.
     int draw(const Camera3D& cam, float aspect);
     void draw_highlight(int x, int y, int z);  // DrawCubeWires 1.002 size, BLACK
     void shutdown();
@@ -45,8 +59,10 @@ private:
 
     Material material_{};
     bool ready_ = false;
-    int loc_cam_ = -1, loc_fog_color_ = -1, loc_fog_start_ = -1, loc_fog_end_ = -1, loc_cutoff_ = -1;
+    int loc_cam_ = -1, loc_fog_color_ = -1, loc_fog_start_ = -1, loc_fog_end_ = -1, loc_cutoff_ = -1,
+        loc_daylight_ = -1;
     FogRange fog_{1.0e6f, 2.0e6f};
+    float daylight_ = 1.f;
     Color sky_{135, 206, 235, 255};
     std::unordered_map<ChunkPos, ChunkGpu, ChunkPosHash> meshes_;
 };

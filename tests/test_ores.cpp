@@ -19,7 +19,6 @@ namespace {
 constexpr uint32_t SEED = 7;
 
 constexpr GenOptions LAYERS_ONLY{false, false, false, false, false};
-constexpr GenOptions NO_ORES{true, true, false, true};
 constexpr GenOptions GEODES_ONLY{false, false, false, true, false};
 
 BlockId block_at(const Column& col, ColumnPos c, int x, int y, int z) {
@@ -153,8 +152,9 @@ TEST(test_ore_replaces_stone_only) {
     for (int cz = -2; cz < 2; ++cz)
         for (int cx = -2; cx < 2; ++cx) {
             const ColumnPos c{cx, cz};
-            const Column plain = generate_column(SEED, c, NO_ORES);
-            const Column with = generate_column(SEED, c);
+            // Features off on both sides: a glowcap needs STONE under it, so ores change them (M3).
+            const Column plain = generate_column(SEED, c, GenOptions{true, true, false, true, false});
+            const Column with = generate_column(SEED, c, GenOptions{true, true, true, true, false});
             for (std::size_t s = 0; s < plain.size(); ++s)
                 for (std::size_t i = 0; i < plain[s]->blocks.size(); ++i) {
                     if (plain[s]->blocks[i] == with[s]->blocks[i]) continue;
@@ -304,11 +304,13 @@ TEST(test_ore_walk_top_boundary) {
 
 TEST(test_ore_stage_matches_generation) {
     // place_ores and place_geodes are exactly the generation stages: applying them to a column
-    // generated without them gives the default column.
+    // generated without them gives the default column. The features come last (M3 glowcaps read
+    // the floor the ores leave), so they are applied after the ores here too.
     for (ColumnPos c : {ColumnPos{0, 0}, ColumnPos{-3, 2}}) {
-        Column col = generate_column(SEED, c, GenOptions{true, true, false, false});
+        Column col = generate_column(SEED, c, GenOptions{true, true, false, false, false});
         place_geodes(col, c, SEED);
         place_ores(col, c, SEED);
+        for (const Feature& f : features_near(SEED, c, 3)) place_feature(col, c, f);
         CHECK(same_column(col, generate_column(SEED, c)));
     }
 }

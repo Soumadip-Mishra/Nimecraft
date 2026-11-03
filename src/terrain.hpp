@@ -125,10 +125,10 @@ Biome biome_at(uint32_t seed, int x, int z);
 // the cap only binds near coasts (it passes 200 at continental 0.44).
 int terrain_height(uint32_t seed, int x, int z);
 
-enum class FeatureType : uint8_t { OakTree, PineTree, Cactus, TallGrass, Flower };
+enum class FeatureType : uint8_t { OakTree, PineTree, Cactus, TallGrass, Flower, Glowcap };
 
-// A feature standing on the ground block below (x, y, z); y = ground height + 1. size: oak trunk
-// 5, pine trunk 6-8, cactus height 1-3, plants 1.
+// A feature standing on the ground block below (x, y, z); y = ground height + 1 (a glowcap: its
+// cave floor + 1). size: oak trunk 5, pine trunk 6-8, cactus height 1-3, plants and glowcaps 1.
 struct Feature {
     int x, y, z;
     FeatureType type;
@@ -136,7 +136,10 @@ struct Feature {
 };
 
 // The features on (x, z) cells up to `margin` blocks outside column c (margin clamped to
-// [0, 16]), at most one per cell, sorted by (x, z, type). A cell qualifies only when its top
+// [0, 16]), at most one surface feature and one glowcap per cell, sorted by (x, z, type).
+// Glowcap: the lowest y in [5, 49] with hash2((seed ^ 0x61C0) + y * 0x27D4EB2F, x, z) % 90 == 0,
+// is_cave at y, and no is_cave at y - 1 (a cave floor), on any ground height. A surface feature
+// or glowcap on a cell a ravine covers is dropped. A surface cell qualifies only when its top
 // block, after carving, is the generated surface at ground h >= SEA_LEVEL (a ravine that cuts the
 // surface leaves no feature). By the cell's biome, with r(salt) = hash2(seed ^ salt, x, z):
 // Forest oak r(0x7EE5) % 12 == 0 on GRASS; Meadow oak r(0x7EE5) % 200, else flower r(0xF10E) % 24,
@@ -149,7 +152,8 @@ std::vector<Feature> features_near(uint32_t seed, ColumnPos c, int margin = 3);
 
 // Writes the cells of f that lie inside column c (and inside y 0..255) into col. Logs overwrite;
 // leaves, cacti, and plants go only into AIR. Oak: LOG y..y+size-1, LEAVES at the top 2 trunk
-// layers (5x5 without corners) and the 2 layers above the trunk (3x3). Pine: PINE_LOG
+// layers (5x5 without corners) and the 2 layers above the trunk (3x3). Glowcap: GLOWCAP at y only
+// into AIR whose block below is STONE (a floor that ores and geodes left alone). Pine: PINE_LOG
 // y..y+size-1, then a cone of PINE_LEAVES over the 5 layers y+size-4 .. y+size with radius
 // 2, 2, 1, 1, 0 (cells with dx^2 + dz^2 <= r^2 + r). Cactus: CACTUS y..y+size-1. TallGrass and
 // Flower: one block at y.

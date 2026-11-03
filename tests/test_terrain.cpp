@@ -25,7 +25,9 @@ constexpr int SAND_MAX = 65;  // SEA_LEVEL + 1: ground at or below this height i
 // FNV-1a 64 over the block ids of the 4 golden columns, each id fed as 2 bytes, low byte first.
 // Recorded from the first green Linux run; GCC, MinGW, and MSVC must all reproduce it unchanged.
 // A mismatch on any toolchain is a bug in generation math, not a reason to change this value.
-constexpr uint64_t TERRAIN_GOLDEN = 0xBA789230D8EA89E6ULL;  // M2 Task 5: biome features
+// M2 Task 5 (biome features) was 0xBA789230D8EA89E6, which the M3 value still gives with GLOWCAP
+// read as AIR.
+constexpr uint64_t TERRAIN_GOLDEN = 0x4527A8EF2D729376ULL;  // M3 Task 1: glowcaps
 
 ColumnPos column_at(int x, int z) {
     return ColumnPos{floor_div(x, CHUNK), floor_div(z, CHUNK)};

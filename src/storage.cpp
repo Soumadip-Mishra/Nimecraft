@@ -187,13 +187,21 @@ std::optional<uint32_t> parse_u32(std::string_view s) {
     return v;
 }
 
-std::optional<float> parse_float(std::string_view s) {
-    float v = 0;
+// The whole of s as a finite float or double.
+template <class T>
+std::optional<T> parse_finite(std::string_view s) {
+    T v = 0;
     const auto res = std::from_chars(s.data(), s.data() + s.size(), v);
     if (s.empty() || res.ec != std::errc{} || res.ptr != s.data() + s.size()) return std::nullopt;
     if (!std::isfinite(v)) return std::nullopt;
     return v;
 }
+
+std::optional<float> parse_float(std::string_view s) {
+    return parse_finite<float>(s);
+}
+
+constexpr double DEFAULT_TIME = 6000;
 
 }  // namespace
 
@@ -262,7 +270,8 @@ fs::path RegionStore::region_path(Key r) const {
 bool save_meta(const fs::path& file, const WorldMeta& m) {
     const std::string text = "version=1\nseed=" + number_text(m.seed) + "\npx=" + number_text(m.px) +
                              "\npy=" + number_text(m.py) + "\npz=" + number_text(m.pz) +
-                             "\nyaw=" + number_text(m.yaw) + "\npitch=" + number_text(m.pitch) + "\n";
+                             "\nyaw=" + number_text(m.yaw) + "\npitch=" + number_text(m.pitch) +
+                             "\ntime=" + number_text(m.time) + "\n";
     return write_file_atomic(file, std::vector<uint8_t>(text.begin(), text.end()));
 }
 
@@ -273,6 +282,7 @@ std::optional<WorldMeta> load_meta(const fs::path& file) {
 
     std::optional<uint32_t> version, seed;
     std::optional<float> px, py, pz, yaw, pitch;
+    double time = DEFAULT_TIME;
     // Skip a UTF-8 byte order mark, which some Windows editors add when saving.
     std::size_t start = text.starts_with("\xEF\xBB\xBF") ? 3 : 0;
     while (start < text.size()) {
@@ -292,8 +302,14 @@ std::optional<WorldMeta> load_meta(const fs::path& file) {
             const std::optional<float> f = parse_float(value);
             if (!f) return std::nullopt;
             (key == "px" ? px : key == "py" ? py : key == "pz" ? pz : key == "yaw" ? yaw : pitch) = f;
+        } else if (key == "time") {
+            // Optional: a bad value falls back to the default instead of rejecting the world.
+            const std::optional<double> t = parse_finite<double>(value);
+            time = t && *t >= 0 ? *t : DEFAULT_TIME;
         }  // unknown keys are ignored
     }
     if (version != 1u || !seed || !px || !py || !pz || !yaw || !pitch) return std::nullopt;
-    return WorldMeta{*seed, *px, *py, *pz, *yaw, *pitch};
+    WorldMeta m{*seed, *px, *py, *pz, *yaw, *pitch};
+    m.time = time;
+    return m;
 }

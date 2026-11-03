@@ -29,13 +29,14 @@ public:
 
     BlockId get(int x, int y, int z) const;  // y < 0 -> DEEPSTONE, y >= 256 -> AIR, unloaded -> AIR
     // false if y is out of range or the column is unloaded. Setting the block already there
-    // returns true and changes nothing. Otherwise marks the chunk modified and dirty, and marks
-    // dirty each loaded neighbor chunk the block borders.
+    // returns true and changes nothing. Otherwise marks the chunk modified and dirty, marks
+    // dirty each loaded chunk whose mesh snapshot holds the block (the face, edge, and corner
+    // neighbors it borders), and updates light (relight_block).
     bool set(int x, int y, int z, BlockId b);
     std::vector<ChunkPos> take_dirty();  // returns and clears, no duplicates, unspecified order
+    void mark_dirty(ChunkPos p);         // adds p to the dirty set if its chunk is loaded
 
 private:
-    void mark_dirty_if_loaded(ChunkPos p);
 
     uint32_t seed_;
     std::unordered_map<ColumnPos, Column, ColumnPosHash> columns_;
