@@ -20,7 +20,7 @@ class RegionStore;
 struct MeshResult {
     ChunkPos pos;
     uint32_t version;
-    MeshData mesh;
+    ChunkMesh mesh;
 };
 
 // The chunk is loaded and its version is still `version`.

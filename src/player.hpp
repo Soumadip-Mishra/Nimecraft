@@ -12,6 +12,8 @@ class World;
 
 constexpr float PLAYER_HALF_W = 0.3f, PLAYER_H = 1.8f, PLAYER_EYE = 1.62f, PLAYER_SPEED = 4.3f,
                 GRAVITY = 28.f, JUMP_VEL = 9.f, MAX_FALL = 50.f, MOUSE_SENS = 0.003f, REACH = 6.f;
+// In water: weaker gravity, a slow sink, swimming up while jump is held, slower walking.
+constexpr float WATER_GRAVITY = 6.f, MAX_SINK = 3.f, SWIM_VEL = 3.5f, WATER_SPEED = 0.6f;
 
 struct Player {
     Vector3 pos;  // feet center
@@ -26,15 +28,24 @@ struct PlayerInput {
     float mouse_dx = 0, mouse_dy = 0;
 };
 
-// x = z = 0.5, feet on top of the highest solid block at (0,0); the column must be loaded.
-// With nothing solid in the column the feet are at y = 0, on the DEEPSTONE below the world.
+// x = z = 0.5, feet on top of the highest solid or WATER block at (0,0) (on the surface of an
+// ocean, not its floor); the column must be loaded. With no such block the feet are at y = 0, on
+// the DEEPSTONE below the world.
 Player spawn_player(const World& w);
+
+// Any cell the player's box overlaps (touching faces do not count) is WATER.
+bool in_water(const Player& p, const World& w);
+
+// The cell holding player_eye(p) is WATER (the underwater screen tint).
+bool eye_in_water(const Player& p, const World& w);
 
 // yaw += dx * MOUSE_SENS, pitch -= dy * MOUSE_SENS clamped to [-1.55, 1.55]. Walking uses
 // forward (cos yaw, 0, sin yaw) and right (-sin yaw, 0, cos yaw), the input normalized when longer
 // than 1. dt is clamped to [0, 0.1] (NaN counts as 0) and integrated in substeps of at most
 // 1/120 s, resolving collisions along X, then Y, then Z. If the player's column is not loaded,
-// only the look angles change.
+// only the look angles change. When in_water at the start of the update, walking speed is
+// x WATER_SPEED and jump does not jump; in each substep that starts in_water, vel.y becomes
+// SWIM_VEL while jump is held, else max(vel.y - WATER_GRAVITY * h, -MAX_SINK).
 void player_update(Player& p, const World& w, const PlayerInput& in, float dt);
 
 Vector3 player_eye(const Player& p);

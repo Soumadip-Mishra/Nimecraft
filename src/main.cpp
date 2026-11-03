@@ -35,6 +35,7 @@ constexpr BlockId HOTBAR[] = {blk::GRASS, blk::DIRT, blk::STONE, blk::SAND,
                               blk::LOG,   blk::LEAVES, blk::PLANKS};
 constexpr int HOTBAR_SIZE = static_cast<int>(sizeof HOTBAR / sizeof HOTBAR[0]);
 constexpr Color SKY{135, 206, 235, 255};
+constexpr Color UNDERWATER{20, 60, 160, 110};  // screen tint while the eye is in WATER
 constexpr int SMOKE_FRAMES = 600;
 constexpr double SMOKE_SPAWN_TIMEOUT_S = 60.0;
 constexpr std::size_t MESH_UPLOADS_PER_FRAME = 16;
@@ -176,6 +177,7 @@ int run(const CliOptions& o) {
     SetExitKey(KEY_NULL);
     Renderer renderer;
     renderer.init();
+    renderer.set_fog(fog_range(o.rd), SKY);
 
     bool captured = !o.smoke;
     if (captured) DisableCursor();
@@ -246,6 +248,7 @@ int run(const CliOptions& o) {
             drawn = renderer.draw(cam, static_cast<float>(GetScreenWidth()) / static_cast<float>(h));
             if (hit.hit) renderer.draw_highlight(hit.x, hit.y, hit.z);
             EndMode3D();
+            if (eye_in_water(player, world)) DrawRectangle(0, 0, GetScreenWidth(), GetScreenHeight(), UNDERWATER);
             draw_hud(selected);
             if (debug) draw_debug(player, world, mgr, drawn);
         } else {

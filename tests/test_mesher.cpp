@@ -21,8 +21,13 @@ World air_world() {
     return w;
 }
 
-MeshData mesh_of(const World& w, ChunkPos p) {
+ChunkMesh layers_of(const World& w, ChunkPos p) {
     return build_mesh(snapshot(w, p), p);
+}
+
+// The opaque layer, which holds everything the M1 tests build from opaque cubes.
+MeshData mesh_of(const World& w, ChunkPos p) {
+    return layers_of(w, p).opaque;
 }
 
 struct V3 {
@@ -38,9 +43,28 @@ V3 normal_at(const MeshData& m, std::size_t i) {
 }
 
 bool indices_in_range(const MeshData& m) {
-    for (uint16_t i : m.indices)
+    for (uint32_t i : m.indices)
         if (i >= m.vertex_count()) return false;
     return true;
+}
+
+float max_y(const MeshData& m) {
+    float y = -1e9f;
+    for (std::size_t i = 0; i < m.vertex_count(); ++i) y = pos_at(m, i).y > y ? pos_at(m, i).y : y;
+    return y;
+}
+
+std::size_t count_y(const MeshData& m, float y) {
+    std::size_t n = 0;
+    for (std::size_t i = 0; i < m.vertex_count(); ++i) n += pos_at(m, i).y == y ? 1 : 0;
+    return n;
+}
+
+// Vertices whose normal points along +X / -X (axis-aligned faces only).
+std::size_t count_normal_x(const MeshData& m, float nx) {
+    std::size_t n = 0;
+    for (std::size_t i = 0; i < m.vertex_count(); ++i) n += normal_at(m, i).x == nx ? 1 : 0;
+    return n;
 }
 
 // Face of a unit normal, by the Face enum order PX, NX, PY, NY, PZ, NZ.
@@ -264,9 +288,13 @@ TEST(test_mesh_checkerboard_worst_case) {
 
 TEST(test_mesh_uv_every_tile) {
     for (BlockId id = 1; id < blk::COUNT; ++id) {
+        if (block_def(id).shape == Shape::Cross) continue;  // test_mesh_cross_plant covers these
         World w = air_world();
         w.set(1, 70, 1, id);
-        const MeshData m = mesh_of(w, ChunkPos{0, 4, 0});
+        const ChunkMesh cm = layers_of(w, ChunkPos{0, 4, 0});
+        const MeshData& m = block_def(id).layer == Layer::Opaque
+                                ? cm.opaque
+                                : (block_def(id).layer == Layer::Cutout ? cm.cutout : cm.translucent);
         CHECK(m.vertex_count() == 24);
         for (std::size_t i = 0; i < m.vertex_count(); ++i) {
             const int t = block_def(id).tiles[static_cast<std::size_t>(face_of(normal_at(m, i)))];
@@ -346,21 +374,28 @@ TEST(test_mesh_unknown_id_is_air) {
     Padded pad;
     pad.b[static_cast<std::size_t>(1 + 1 * 18 + 1 * 324)] = 500;  // local (0,0,0), id >= COUNT
     CHECK(pad.at(0, 0, 0) == 500);
-    CHECK(build_mesh(pad, ChunkPos{0, 4, 0}).vertex_count() == 0);
+    CHECK(build_mesh(pad, ChunkPos{0, 4, 0}).empty());
 }
 
 TEST(test_mesh_deterministic) {
+    // Every layer and shape: leaves (Cutout cube), stone (Opaque), water (Liquid), grass (Cross).
+    const BlockId kinds[4] = {blk::LEAVES, blk::STONE, blk::WATER, blk::TALL_GRASS};
     World w = air_world();
-    for (int i = 0; i < 40; ++i) w.set((i * 7) % 16, 64 + (i * 5) % 16, (i * 3) % 16, blk::LEAVES);
+    for (int i = 0; i < 40; ++i)
+        w.set((i * 7) % 16, 64 + (i * 5) % 16, (i * 3) % 16, kinds[i % 4]);
     const Padded pad = snapshot(w, ChunkPos{0, 4, 0});
-    const MeshData a = build_mesh(pad, ChunkPos{0, 4, 0});
-    const MeshData b = build_mesh(pad, ChunkPos{0, 4, 0});
-    CHECK(a.vertex_count() > 0);
-    CHECK(a.positions == b.positions);
-    CHECK(a.texcoords == b.texcoords);
-    CHECK(a.normals == b.normals);
-    CHECK(a.colors == b.colors);
-    CHECK(a.indices == b.indices);
+    const ChunkMesh a = build_mesh(pad, ChunkPos{0, 4, 0});
+    const ChunkMesh b = build_mesh(pad, ChunkPos{0, 4, 0});
+    const MeshData* la[3] = {&a.opaque, &a.cutout, &a.translucent};
+    const MeshData* lb[3] = {&b.opaque, &b.cutout, &b.translucent};
+    for (int l = 0; l < 3; ++l) {
+        CHECK(la[l]->vertex_count() > 0);
+        CHECK(la[l]->positions == lb[l]->positions);
+        CHECK(la[l]->texcoords == lb[l]->texcoords);
+        CHECK(la[l]->normals == lb[l]->normals);
+        CHECK(la[l]->colors == lb[l]->colors);
+        CHECK(la[l]->indices == lb[l]->indices);
+    }
 }
 
 TEST(test_mesh_concurrent_build) {
@@ -372,8 +407,329 @@ TEST(test_mesh_concurrent_build) {
     std::vector<std::thread> threads;
     for (std::size_t t = 0; t < counts.size(); ++t)
         threads.emplace_back([&pad, &counts, t] {
-            counts[t] = build_mesh(pad, ChunkPos{0, 4, 0}).vertex_count();
+            counts[t] = build_mesh(pad, ChunkPos{0, 4, 0}).opaque.vertex_count();
         });
     for (auto& th : threads) th.join();
     for (std::size_t c : counts) CHECK(c == 48);
+}
+
+// ---- M2 Task 1: render layers and block shapes ----
+
+TEST(test_mesh_leaves_adjacent_both_drawn) {
+    World w = air_world();
+    w.set(1, 70, 1, blk::LEAVES);
+    w.set(2, 70, 1, blk::LEAVES);
+    const ChunkMesh m = layers_of(w, ChunkPos{0, 4, 0});
+    CHECK(m.cutout.vertex_count() == 48);
+    CHECK(m.opaque.vertex_count() == 0);
+    CHECK(m.translucent.vertex_count() == 0);
+}
+
+TEST(test_mesh_water_same_id_culled) {
+    World w = air_world();
+    w.set(1, 70, 1, blk::WATER);
+    w.set(2, 70, 1, blk::WATER);
+    const ChunkMesh m = layers_of(w, ChunkPos{0, 4, 0});
+    CHECK(m.translucent.vertex_count() == 40);
+    CHECK(m.opaque.vertex_count() == 0);
+    CHECK(m.cutout.vertex_count() == 0);
+    // Two top faces of 4 vertices, plus the top corners of the 6 side faces, all at 70.875.
+    std::size_t top = 0;
+    for (std::size_t i = 0; i < m.translucent.vertex_count(); ++i)
+        if (normal_at(m.translucent, i).y > 0.5f) {
+            ++top;
+            CHECK(pos_at(m.translucent, i).y == 70.875f);
+        }
+    CHECK(top == 8);
+    CHECK(max_y(m.translucent) == 70.875f);
+    CHECK(count_y(m.translucent, 70.875f) == 8 + 12);
+}
+
+TEST(test_mesh_water_against_stone) {
+    // The water face toward the stone is culled (Translucent skips opaque neighbors). The stone
+    // face toward the water stays: Opaque skips only opaque neighbors, and the floor must show
+    // through water (M2 Task 6 manual check).
+    World w = air_world();
+    w.set(1, 70, 1, blk::WATER);
+    w.set(2, 70, 1, blk::STONE);
+    const ChunkMesh m = layers_of(w, ChunkPos{0, 4, 0});
+    CHECK(m.translucent.vertex_count() == 20);
+    CHECK(count_normal_x(m.translucent, 1.f) == 0);  // no water face on the shared plane x = 2
+    CHECK(m.opaque.vertex_count() == 24);
+    CHECK(count_normal_x(m.opaque, -1.f) == 4);      // the stone's -X face, toward the water
+}
+
+TEST(test_mesh_cross_plant) {
+    World w = air_world();
+    w.set(1, 70, 1, blk::TALL_GRASS);
+    const ChunkMesh m = layers_of(w, ChunkPos{0, 4, 0});
+    CHECK(m.cutout.vertex_count() == 16);
+    CHECK(m.cutout.indices.size() == 24);
+    CHECK(m.opaque.vertex_count() == 0);
+    CHECK(m.translucent.vertex_count() == 0);
+    CHECK(indices_in_range(m.cutout));
+    // Diagonal quads span the block: every vertex is on a corner column of the block, and each
+    // quad joins two opposite corners (x - 1 == z - 1 or x - 1 == 2 - z).
+    for (std::size_t i = 0; i < m.cutout.vertex_count(); ++i) {
+        const V3 p = pos_at(m.cutout, i);
+        CHECK(p.x == 1.f || p.x == 2.f);
+        CHECK(p.z == 1.f || p.z == 2.f);
+        CHECK(p.y == 70.f || p.y == 71.f);
+        const V3 n = normal_at(m.cutout, i);
+        CHECK(n.y == 0.f);
+        CHECK_NEAR(n.x * n.x + n.z * n.z, 1.0, 1e-6);
+        // Every vertex samples the tall grass tile (column t % 8, row t / 8 of the 8x8 atlas).
+        const float u0 = static_cast<float>(T_TALL_GRASS % 8) / 8.f;
+        const float v0 = static_cast<float>(T_TALL_GRASS / 8) / 8.f;
+        const float u = m.cutout.texcoords[i * 2], v = m.cutout.texcoords[i * 2 + 1];
+        CHECK(u >= u0 && u <= u0 + 0.125f);
+        CHECK(v >= v0 && v <= v0 + 0.125f);
+    }
+    // Double-sided: the 4 quads have 4 distinct normals, in 2 opposite pairs.
+    V3 normals[4];
+    for (std::size_t q = 0; q < 4; ++q) normals[q] = normal_at(m.cutout, q * 4);
+    int opposite_pairs = 0;
+    for (int a = 0; a < 4; ++a)
+        for (int b = a + 1; b < 4; ++b)
+            if (normals[a].x == -normals[b].x && normals[a].z == -normals[b].z) ++opposite_pairs;
+    CHECK(opposite_pairs == 2);
+    // Each triangle is counter-clockwise seen from the side its normal points to.
+    for (std::size_t t = 0; t + 2 < m.cutout.indices.size(); t += 3) {
+        const V3 a = pos_at(m.cutout, m.cutout.indices[t]), b = pos_at(m.cutout, m.cutout.indices[t + 1]),
+                 c = pos_at(m.cutout, m.cutout.indices[t + 2]);
+        const V3 n = normal_at(m.cutout, m.cutout.indices[t]);
+        const V3 e1{b.x - a.x, b.y - a.y, b.z - a.z}, e2{c.x - a.x, c.y - a.y, c.z - a.z};
+        const V3 cr{e1.y * e2.z - e1.z * e2.y, e1.z * e2.x - e1.x * e2.z, e1.x * e2.y - e1.y * e2.x};
+        CHECK(cr.x * n.x + cr.y * n.y + cr.z * n.z > 0.f);
+    }
+}
+
+TEST(test_mesh_flower_cross) {
+    World w = air_world();
+    w.set(1, 70, 1, blk::FLOWER);
+    const ChunkMesh m = layers_of(w, ChunkPos{0, 4, 0});
+    CHECK(m.cutout.vertex_count() == 16);
+    // Every vertex samples the flower tile (T_FLOWER: column t % 8, row t / 8 of the 8x8 atlas).
+    const float u0 = static_cast<float>(T_FLOWER % 8) / 8.f, v0 = static_cast<float>(T_FLOWER / 8) / 8.f;
+    for (std::size_t i = 0; i < m.cutout.vertex_count(); ++i) {
+        const float u = m.cutout.texcoords[i * 2], v = m.cutout.texcoords[i * 2 + 1];
+        CHECK(u >= u0 && u <= u0 + 0.125f);
+        CHECK(v >= v0 && v <= v0 + 0.125f);
+    }
+}
+
+TEST(test_mesh_plant_does_not_hide_neighbor) {
+    World w = air_world();
+    w.set(1, 70, 1, blk::STONE);
+    w.set(2, 70, 1, blk::TALL_GRASS);
+    const ChunkMesh m = layers_of(w, ChunkPos{0, 4, 0});
+    CHECK(m.opaque.vertex_count() == 24);
+    CHECK(count_normal_x(m.opaque, 1.f) == 4);  // the face toward the plant
+    CHECK(m.cutout.vertex_count() == 16);
+}
+
+TEST(test_mesh_plant_surrounded_still_drawn) {
+    // A cross plant has no faces to cull: even boxed in by stone it emits its 16 vertices.
+    World w = air_world();
+    w.set(5, 70, 5, blk::FLOWER);
+    for (int d = -1; d <= 1; d += 2) {
+        w.set(5 + d, 70, 5, blk::STONE);
+        w.set(5, 70 + d, 5, blk::STONE);
+        w.set(5, 70, 5 + d, blk::STONE);
+    }
+    const ChunkMesh m = layers_of(w, ChunkPos{0, 4, 0});
+    CHECK(m.cutout.vertex_count() == 16);
+    CHECK(m.opaque.vertex_count() == 6 * 24);  // plants hide nothing
+}
+
+TEST(test_mesh_translucent_different_ids) {
+    World w = air_world();
+    w.set(1, 70, 1, blk::ICE);
+    w.set(2, 70, 1, blk::WATER);
+    const ChunkMesh m = layers_of(w, ChunkPos{0, 4, 0});
+    CHECK(m.translucent.vertex_count() == 48);
+    CHECK(m.opaque.vertex_count() == 0);
+}
+
+TEST(test_mesh_ice_same_id_culled) {
+    // ICE is a Translucent Cube: same-id neighbors cull, and no face is lowered.
+    World w = air_world();
+    w.set(1, 70, 1, blk::ICE);
+    w.set(1, 71, 1, blk::ICE);
+    const ChunkMesh m = layers_of(w, ChunkPos{0, 4, 0});
+    CHECK(m.translucent.vertex_count() == 40);
+    CHECK(max_y(m.translucent) == 72.f);
+}
+
+TEST(test_mesh_leaves_hidden_by_stone) {
+    // Cutout faces skip opaque neighbors: the leaves' face toward the stone is gone.
+    World w = air_world();
+    w.set(1, 70, 1, blk::LEAVES);
+    w.set(2, 70, 1, blk::STONE);
+    const ChunkMesh m = layers_of(w, ChunkPos{0, 4, 0});
+    CHECK(m.cutout.vertex_count() == 20);
+    CHECK(count_normal_x(m.cutout, 1.f) == 0);
+    CHECK(m.opaque.vertex_count() == 24);  // leaves hide nothing
+}
+
+TEST(test_mesh_leaves_beside_water) {
+    // Cutout and Translucent are both non-opaque, so each draws its face toward the other.
+    World w = air_world();
+    w.set(1, 70, 1, blk::LEAVES);
+    w.set(2, 70, 1, blk::WATER);
+    const ChunkMesh m = layers_of(w, ChunkPos{0, 4, 0});
+    CHECK(m.cutout.vertex_count() == 24);
+    CHECK(m.translucent.vertex_count() == 24);
+}
+
+TEST(test_mesh_water_column) {
+    World w = air_world();
+    w.set(1, 70, 1, blk::WATER);
+    w.set(1, 71, 1, blk::WATER);
+    const ChunkMesh m = layers_of(w, ChunkPos{0, 4, 0});
+    // 8 side faces, the top face, and the bottom face; nothing between the two blocks.
+    CHECK(m.translucent.vertex_count() == 40);
+    std::size_t up = 0, down = 0;
+    for (std::size_t i = 0; i < m.translucent.vertex_count(); ++i) {
+        const V3 n = normal_at(m.translucent, i), p = pos_at(m.translucent, i);
+        if (n.y > 0.5f) {
+            ++up;
+            CHECK(p.y == 71.875f);
+        }
+        if (n.y < -0.5f) {
+            ++down;
+            CHECK(p.y == 70.f);
+        }
+    }
+    CHECK(up == 4);
+    CHECK(down == 4);
+    CHECK(max_y(m.translucent) == 71.875f);
+    CHECK(count_y(m.translucent, 70.875f) == 0);  // the lower block is full height
+    CHECK(count_y(m.translucent, 71.f) == 16);    // lower sides' tops and upper sides' bottoms
+}
+
+TEST(test_mesh_water_under_ice_lowered) {
+    // ICE is not the same liquid, so the water below it keeps a lowered top face.
+    World w = air_world();
+    w.set(1, 70, 1, blk::WATER);
+    w.set(1, 71, 1, blk::ICE);
+    const ChunkMesh m = layers_of(w, ChunkPos{0, 4, 0});
+    CHECK(m.translucent.vertex_count() == 48);
+    CHECK(count_y(m.translucent, 70.875f) == 4 + 4 * 2);  // water top face + its 4 sides' tops
+}
+
+TEST(test_mesh_water_world_top) {
+    // Above the world reads as AIR, so water at y = 255 is lowered to 255.875.
+    World w = air_world();
+    w.set(1, 255, 1, blk::WATER);
+    const ChunkMesh m = layers_of(w, ChunkPos{0, 15, 0});
+    CHECK(m.translucent.vertex_count() == 24);
+    CHECK(max_y(m.translucent) == 255.875f);
+}
+
+TEST(test_mesh_water_negative_border) {
+    // Same-id culling works across the chunk border at x = -1 / 0.
+    World w = air_world();
+    w.set(-1, 70, 1, blk::WATER);
+    w.set(0, 70, 1, blk::WATER);
+    CHECK(layers_of(w, ChunkPos{-1, 4, 0}).translucent.vertex_count() == 20);
+    CHECK(layers_of(w, ChunkPos{0, 4, 0}).translucent.vertex_count() == 20);
+}
+
+TEST(test_mesh_water_unloaded_neighbor) {
+    // Column 2 is unloaded (AIR), so the water at x = 31 keeps its +X face.
+    World w = air_world();
+    w.set(31, 70, 1, blk::WATER);
+    CHECK(layers_of(w, ChunkPos{1, 4, 0}).translucent.vertex_count() == 24);
+}
+
+TEST(test_mesh_layers_border) {
+    World w = air_world();
+    w.set(15, 70, 1, blk::LEAVES);
+    w.set(16, 70, 1, blk::LEAVES);
+    const ChunkMesh a = layers_of(w, ChunkPos{0, 4, 0});
+    const ChunkMesh b = layers_of(w, ChunkPos{1, 4, 0});
+    CHECK(a.cutout.vertex_count() == 24);
+    CHECK(b.cutout.vertex_count() == 24);
+    CHECK(count_normal_x(a.cutout, 1.f) == 4);   // x = 15's face toward x = 16
+    CHECK(count_normal_x(b.cutout, -1.f) == 4);  // x = 16's face toward x = 15
+    CHECK(a.opaque.vertex_count() == 0);
+    CHECK(b.opaque.vertex_count() == 0);
+}
+
+TEST(test_chunk_mesh_empty) {
+    World w = air_world();
+    CHECK(layers_of(w, ChunkPos{0, 4, 0}).empty());
+    // Any one non-empty layer makes the chunk mesh non-empty.
+    const BlockId one_per_layer[3] = {blk::STONE, blk::LEAVES, blk::WATER};
+    for (BlockId id : one_per_layer) {
+        World w2 = air_world();
+        w2.set(1, 70, 1, id);
+        CHECK(!layers_of(w2, ChunkPos{0, 4, 0}).empty());
+    }
+}
+
+TEST(test_mesh_full_leaves_chunk) {
+    // Leaves never cull each other: 4096 blocks x 6 faces x 4 = 98,304 vertices, more than a
+    // 16-bit index reaches, so indices are 32-bit and split_mesh cuts the layer for the GPU.
+    World w = air_world();
+    for (int y = 64; y < 80; ++y)
+        for (int z = 0; z < 16; ++z)
+            for (int x = 0; x < 16; ++x) w.set(x, y, z, blk::LEAVES);
+    const ChunkMesh m = layers_of(w, ChunkPos{0, 4, 0});
+    CHECK(m.cutout.vertex_count() == 98304);
+    CHECK(m.cutout.indices.size() == 147456);
+    CHECK(indices_in_range(m.cutout));
+    const std::vector<MeshData> parts = split_mesh(m.cutout);
+    CHECK(parts.size() == 2);
+    CHECK(parts[0].vertex_count() == 65536);
+    CHECK(parts[1].vertex_count() == 32768);
+    for (const MeshData& part : parts) {
+        CHECK(indices_in_range(part));
+        CHECK(part.indices.size() == part.vertex_count() / 4 * 6);
+        CHECK(part.texcoords.size() == part.vertex_count() * 2);
+        CHECK(part.normals.size() == part.vertex_count() * 3);
+        CHECK(part.colors.size() == part.vertex_count() * 4);
+    }
+    // The second part starts with the original's vertex 65,536, its first index points at it.
+    CHECK(parts[1].positions[0] == m.cutout.positions[65536 * 3]);
+    CHECK(parts[1].indices[0] == m.cutout.indices[16384 * 6] - 65536);
+}
+
+TEST(test_split_mesh_boundaries) {
+    // Built from one face per stone block in a row: n faces = 4n vertices.
+    auto faces = [](int n) {
+        World w = air_world();
+        for (int i = 0; i < n; ++i) w.set(1 + 2 * i, 70, 1, blk::STONE);  // separated: 6 faces each
+        return mesh_of(w, ChunkPos{0, 4, 0});
+    };
+    CHECK(split_mesh(MeshData{}).empty());
+    const MeshData one = faces(1);  // 24 vertices
+    const std::vector<MeshData> whole = split_mesh(one, 24);
+    CHECK(whole.size() == 1);  // exactly at the limit: one part, unchanged
+    CHECK(whole[0].positions == one.positions);
+    CHECK(whole[0].indices == one.indices);
+    const std::vector<MeshData> cut = split_mesh(one, 20);  // just below: 20 + 4
+    CHECK(cut.size() == 2);
+    CHECK(cut[0].vertex_count() == 20);
+    CHECK(cut[1].vertex_count() == 4);
+    CHECK(cut[1].indices.size() == 6);
+    CHECK(indices_in_range(cut[0]));
+    CHECK(indices_in_range(cut[1]));
+    CHECK(split_mesh(one, 28).size() == 1);  // just above
+    // Invalid limits: not a multiple of 4 rounds down (6 -> 4), below 4 still takes one quad.
+    for (std::size_t bad : {std::size_t{6}, std::size_t{1}}) {
+        const std::vector<MeshData> rounded = split_mesh(one, bad);
+        CHECK(rounded.size() == 6);
+        for (const MeshData& q : rounded) {
+            CHECK(q.vertex_count() == 4);
+            CHECK(indices_in_range(q));
+        }
+    }
+    const std::vector<MeshData> quads = split_mesh(faces(2), 4);  // one quad per part
+    CHECK(quads.size() == 12);
+    for (const MeshData& q : quads) {
+        CHECK(q.vertex_count() == 4);
+        CHECK(q.indices == (std::vector<uint32_t>{0, 1, 2, 0, 2, 3}));
+    }
 }

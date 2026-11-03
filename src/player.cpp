@@ -18,6 +18,15 @@ float& component(Vector3& v, int axis) {
     return axis == 0 ? v.x : (axis == 1 ? v.y : v.z);
 }
 
+// The cells a box [mn, mx] overlaps per axis, lo[i]..hi[i]; faces that only touch a cell do not
+// count. Shared by collision and in_water so both see the same cells.
+void cell_span(const double mn[3], const double mx[3], int lo[3], int hi[3]) {
+    for (int i = 0; i < 3; ++i) {
+        lo[i] = static_cast<int>(std::floor(mn[i] + TOUCH));
+        hi[i] = static_cast<int>(std::ceil(mx[i] - TOUCH)) - 1;
+    }
+}
+
 // Moves the player by d along one axis and stops it flush against the first solid block in the
 // way. Returns true when blocked. Substeps move less than one block, so one pass suffices.
 bool move_axis(Player& p, const World& w, int axis, float d) {
@@ -32,10 +41,7 @@ bool move_axis(Player& p, const World& w, int axis, float d) {
     mn[axis] = moved - ext_lo[axis];
     mx[axis] = moved + ext_hi[axis];
     int lo[3], hi[3];
-    for (int i = 0; i < 3; ++i) {
-        lo[i] = static_cast<int>(std::floor(mn[i] + TOUCH));
-        hi[i] = static_cast<int>(std::ceil(mx[i] - TOUCH)) - 1;
-    }
+    cell_span(mn, mx, lo, hi);
 
     bool blocked = false;
     int limit = d > 0 ? hi[axis] : lo[axis];  // nearest blocking cell along the motion
@@ -55,17 +61,41 @@ bool move_axis(Player& p, const World& w, int axis, float d) {
     return true;
 }
 
+int cell_of(float v) {
+    return static_cast<int>(std::floor(v));
+}
+
 }  // namespace
 
 Player spawn_player(const World& w) {
     Player p{};
     p.pos = Vector3{0.5f, 0.f, 0.5f};
-    for (int y = WORLD_HEIGHT - 1; y >= 0; --y)
-        if (block_def(w.get(0, y, 0)).solid) {
+    for (int y = WORLD_HEIGHT - 1; y >= 0; --y) {
+        const BlockId b = w.get(0, y, 0);
+        if (block_def(b).solid || b == blk::WATER) {
             p.pos.y = static_cast<float>(y + 1);
             break;
         }
+    }
     return p;
+}
+
+bool in_water(const Player& p, const World& w) {
+    const double px = p.pos.x, py = p.pos.y, pz = p.pos.z;
+    const double mn[3] = {px - PLAYER_HALF_W, py, pz - PLAYER_HALF_W};
+    const double mx[3] = {px + PLAYER_HALF_W, py + PLAYER_H, pz + PLAYER_HALF_W};
+    int lo[3], hi[3];
+    cell_span(mn, mx, lo, hi);
+    for (int y = lo[1]; y <= hi[1]; ++y)
+        for (int z = lo[2]; z <= hi[2]; ++z)
+            for (int x = lo[0]; x <= hi[0]; ++x)
+                if (w.get(x, y, z) == blk::WATER) return true;
+    return false;
+}
+
+bool eye_in_water(const Player& p, const World& w) {
+    const Vector3 e = player_eye(p);
+    return w.get(cell_of(e.x), cell_of(e.y), cell_of(e.z)) == blk::WATER;
 }
 
 void player_update(Player& p, const World& w, const PlayerInput& in, float dt) {
@@ -86,9 +116,11 @@ void player_update(Player& p, const World& w, const PlayerInput& in, float dt) {
         wx /= len;
         wz /= len;
     }
-    p.vel.x = wx * PLAYER_SPEED;
-    p.vel.z = wz * PLAYER_SPEED;
-    if (in.jump && p.on_ground) {
+    const bool wet = in_water(p, w);
+    const float speed = wet ? PLAYER_SPEED * WATER_SPEED : PLAYER_SPEED;
+    p.vel.x = wx * speed;
+    p.vel.z = wz * speed;
+    if (in.jump && p.on_ground && !wet) {
         p.vel.y = JUMP_VEL;
         p.on_ground = false;
     }
@@ -96,7 +128,12 @@ void player_update(Player& p, const World& w, const PlayerInput& in, float dt) {
     const int steps = std::max(1, static_cast<int>(std::ceil(static_cast<double>(dt) / SUBSTEP)));
     const float h = dt / static_cast<float>(steps);
     for (int i = 0; i < steps; ++i) {
-        p.vel.y = std::max(p.vel.y - GRAVITY * h, -MAX_FALL);
+        if (!in_water(p, w))
+            p.vel.y = std::max(p.vel.y - GRAVITY * h, -MAX_FALL);
+        else if (in.jump)
+            p.vel.y = SWIM_VEL;
+        else
+            p.vel.y = std::max(p.vel.y - WATER_GRAVITY * h, -MAX_SINK);
         if (move_axis(p, w, 0, p.vel.x * h)) p.vel.x = 0.f;
         const float dy = p.vel.y * h;
         const bool blocked_y = move_axis(p, w, 1, dy);

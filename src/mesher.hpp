@@ -27,14 +27,37 @@ struct Padded {
 // read AIR, exactly as World::get does.
 Padded snapshot(const World& w, ChunkPos p);  // main thread only
 
+// Quads only: every quad is 4 consecutive vertices and 6 consecutive indices into them.
 struct MeshData {
     std::vector<float> positions, texcoords, normals;  // 3, 2, 3 per vertex, world coordinates
     std::vector<uint8_t> colors;                       // RGBA, R=G=B=shade, A=255
-    std::vector<uint16_t> indices;                     // 6 per face
+    // 6 per quad. 32-bit: a Cutout layer can exceed 65,536 vertices (leaves never cull leaves),
+    // so the renderer cuts layers with split_mesh before uploading 16-bit GPU indices.
+    std::vector<uint32_t> indices;
     std::size_t vertex_count() const;
 };
 
-// One quad per face of an opaque block whose neighbor is not opaque. Each face uses the block's
-// tile for that face (u0 = (t % 8) / 8, v0 = (t / 8) / 8, size 1/8), its Shade, and two
-// triangles that are counter-clockwise seen from outside.
-MeshData build_mesh(const Padded& pad, ChunkPos p);  // pure, thread-safe
+struct ChunkMesh {
+    MeshData opaque, cutout, translucent;  // one per Layer
+    bool empty() const;                    // no vertices in any layer
+};
+
+// Every block goes into the mesh of its BlockDef::layer. Each face uses the block's tile for that
+// face (u0 = (t % 8) / 8, v0 = (t / 8) / 8, size 1/8), its Shade, and two triangles that are
+// counter-clockwise seen from outside.
+// - Cube, Opaque or Cutout: a face is drawn unless its neighbor is opaque.
+// - Cube or Liquid, Translucent: a face is drawn unless its neighbor is opaque or has the same id.
+// - Liquid: when the block above is not the same id, the top face and the top edges of the side
+//   faces sit at y + 0.875.
+// - Cross: two diagonal quads, each emitted for both sides (16 vertices), shade SHADE_X, never
+//   culled.
+// AIR and unknown ids (>= blk::COUNT) are never meshed.
+ChunkMesh build_mesh(const Padded& pad, ChunkPos p);  // pure, thread-safe
+
+constexpr std::size_t MAX_PART_VERTICES = 65536;  // vertices a 16-bit index reaches
+
+// Cuts m into consecutive parts of at most max_vertices vertices, whole quads only, with each
+// part's indices rebased to start at its own first vertex. max_vertices is rounded down to a
+// multiple of 4, and a limit below 4 still puts one quad in each part. An empty mesh gives no
+// parts; a mesh within the limit gives one part equal to m.
+std::vector<MeshData> split_mesh(const MeshData& m, std::size_t max_vertices = MAX_PART_VERTICES);

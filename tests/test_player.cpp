@@ -35,6 +35,15 @@ World flat_world() {
     return layered_world(0, 69);
 }
 
+// layered_world(0, floor_top) with WATER from floor_top + 1 to water_top in every column.
+World pool_world(int floor_top, int water_top) {
+    World w = layered_world(0, floor_top);
+    for (int x = -32; x < 48; ++x)
+        for (int z = -32; z < 48; ++z)
+            for (int y = floor_top + 1; y <= water_top; ++y) w.set(x, y, z, blk::WATER);
+    return w;
+}
+
 Player at(float x, float y, float z) {
     Player p{};
     p.pos = Vector3{x, y, z};
@@ -381,4 +390,144 @@ TEST(test_spawn_player_empty_column) {
     CHECK(spawn_player(w).pos.y == 0.f);  // nothing solid: stand on the DEEPSTONE below the world
     w.set(0, 255, 0, blk::STONE);
     CHECK(spawn_player(w).pos.y == 256.f);
+}
+
+// ---- M2 Task 6: swimming ----
+
+TEST(test_player_swims_up) {
+    // A 5-deep pool (WATER y = 60..64 on a floor at 60); jump held for 2 s.
+    World w = pool_world(59, 64);
+    Player p = at(8.5f, 60.f, 8.5f);
+    PlayerInput swim;
+    swim.jump = true;
+    run(p, w, swim, 120);
+    CHECK(p.pos.y >= 61.5f);
+}
+
+TEST(test_player_sinks_slowly) {
+    // In deep water with no input: gravity 6, sinking capped at 3.
+    World w = pool_world(39, 64);
+    Player p = at(8.5f, 55.f, 8.5f);
+    bool capped = true;
+    for (int i = 0; i < 120; ++i) {
+        player_update(p, w, PlayerInput{}, 1.f / 60.f);
+        capped = capped && p.vel.y >= -3.f;
+        if (i == 14) CHECK_NEAR(p.vel.y, -1.5, 1e-3);  // 0.25 s at gravity 6
+    }
+    CHECK(capped);
+    CHECK_NEAR(p.vel.y, -3.0, 1e-4);
+    CHECK(p.pos.y < 55.f);
+}
+
+TEST(test_player_water_slows_fall) {
+    // 3-deep water (y = 60..62) entered from 10 blocks above its surface (feet at 73).
+    World w = pool_world(59, 62);
+    Player p = at(8.5f, 73.f, 8.5f);
+    // From 0.5 s (30 frames) after entering, every frame sinks no faster than 3.
+    int entered = -1;
+    bool slowed = true;
+    for (int i = 0; i < 240; ++i) {
+        player_update(p, w, PlayerInput{}, 1.f / 60.f);
+        if (entered < 0 && in_water(p, w)) entered = i;
+        if (entered >= 0 && i - entered >= 30) slowed = slowed && p.vel.y >= -3.f;
+    }
+    CHECK(entered >= 0 && entered < 180);
+    CHECK(slowed);
+    CHECK_NEAR(p.pos.y, 60.0, 1e-3);
+    CHECK(p.on_ground);
+}
+
+// ---- Coverage Checklist additions ----
+
+TEST(test_player_in_water_cells) {
+    World w = pool_world(59, 64);
+    CHECK(in_water(at(8.5f, 60.f, 8.5f), w));    // fully submerged
+    CHECK(in_water(at(8.5f, 64.9f, 8.5f), w));   // feet in the top water cell
+    CHECK(!in_water(at(8.5f, 65.f, 8.5f), w));   // feet exactly on the surface: touching only
+    CHECK(!in_water(at(8.5f, 70.f, 8.5f), w));   // above
+    World dry = flat_world();
+    dry.set(9, 71, 8, blk::WATER);               // one cell at head height beside the body
+    CHECK(in_water(at(9.2f, 70.f, 8.5f), dry));  // box x 8.9..9.5 overlaps x = 9
+    CHECK(!in_water(at(8.7f, 70.f, 8.5f), dry)); // box x 8.4..9.0 only touches it
+    // A body straddling the column border at x = 16 (box 15.8..16.4) sees water at x = 15 only;
+    // the same at the border x = 0 (box -0.4..0.2) with water at x = 0 only.
+    World border = flat_world();
+    border.set(15, 70, 8, blk::WATER);
+    border.set(0, 70, 8, blk::WATER);
+    CHECK(in_water(at(16.1f, 70.f, 8.5f), border));
+    CHECK(!in_water(at(16.4f, 70.f, 8.5f), border));
+    CHECK(in_water(at(-0.1f, 70.f, 8.5f), border));
+    CHECK(!in_water(at(-0.4f, 70.f, 8.5f), border));
+    // Negative coordinates.
+    World neg = pool_world(59, 64);
+    CHECK(in_water(at(-20.5f, 61.f, -7.5f), neg));
+    // Unloaded columns are not water.
+    World none(1);
+    CHECK(!in_water(at(8.5f, 60.f, 8.5f), none));
+}
+
+TEST(test_player_eye_in_water) {
+    World w = pool_world(59, 64);
+    // Eye at y + 1.62: feet 63.0 -> eye 64.62 in the top water cell; feet 63.5 -> eye 65.12 in air.
+    CHECK(eye_in_water(at(8.5f, 63.f, 8.5f), w));
+    CHECK(!eye_in_water(at(8.5f, 63.5f, 8.5f), w));
+    CHECK(eye_in_water(at(-3.5f, 60.f, -3.5f), w));
+    World none(1);
+    CHECK(!eye_in_water(at(8.5f, 60.f, 8.5f), none));
+}
+
+TEST(test_player_swim_horizontal_speed) {
+    // Walking on the pool floor, fully submerged: 0.6 x 4.3 = 2.58 blocks per second.
+    World w = pool_world(59, 64);
+    Player p = at(8.5f, 60.f, 8.5f);
+    PlayerInput walk;
+    walk.forward = 1.f;  // yaw 0: +x
+    run(p, w, walk, 60);
+    CHECK_NEAR(p.pos.x, 8.5 + 2.58, 1e-3);
+    // The same walk on dry ground covers 4.3.
+    World dry = flat_world();
+    Player q = at(8.5f, 70.f, 8.5f);
+    run(q, dry, walk, 60);
+    CHECK_NEAR(q.pos.x, 8.5 + 4.3, 1e-3);
+}
+
+TEST(test_player_swim_jump_from_floor) {
+    // Jump held on the floor of a pool swims up at 3.5 instead of jumping at 9.
+    World w = pool_world(59, 64);
+    Player p = at(8.5f, 60.f, 8.5f);
+    run(p, w, PlayerInput{}, 10);
+    CHECK(p.on_ground);
+    PlayerInput swim;
+    swim.jump = true;
+    player_update(p, w, swim, 1.f / 60.f);
+    CHECK_NEAR(p.vel.y, 3.5, 1e-4);
+}
+
+TEST(test_player_swim_large_dt_matches_small) {
+    // dt = 1.0 is clamped to 0.1, so it matches 6 steps of 1/60 s in water.
+    World w = pool_world(39, 64);
+    Player a = at(8.5f, 55.f, 8.5f), b = a;
+    player_update(a, w, PlayerInput{}, 1.0f);
+    run(b, w, PlayerInput{}, 6);
+    CHECK_NEAR(a.pos.y, b.pos.y, 1e-4);
+    CHECK_NEAR(a.vel.y, b.vel.y, 1e-4);
+}
+
+TEST(test_player_swim_input_frozen_when_unloaded) {
+    // Swim input (jump held) does not move a player whose column is not loaded; the freeze check
+    // runs before any water check.
+    World w = pool_world(59, 64);
+    Player p = at(100.5f, 62.f, 8.5f);  // column 6 is not loaded
+    PlayerInput swim;
+    swim.jump = true;
+    run(p, w, swim, 30);
+    CHECK(p.pos.y == 62.f);
+}
+
+TEST(test_regress_spawn_on_water) {
+    // An ocean at (0, 0): the player spawns on the water surface, not on the sea floor.
+    World w = pool_world(39, 64);
+    Player p = spawn_player(w);
+    CHECK(p.pos.y == 65.f);
+    CHECK(p.pos.x == 0.5f && p.pos.z == 0.5f);
 }

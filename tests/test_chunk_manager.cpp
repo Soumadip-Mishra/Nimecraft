@@ -206,7 +206,7 @@ TEST(test_manager_flush_edits) {
     CHECK(has_mesh(meshes, ChunkPos{0, 6, 0}));
     for (const MeshResult& r : meshes) {
         CHECK(r.version == v);
-        CHECK(r.mesh.vertex_count() == 24);
+        CHECK(r.mesh.opaque.vertex_count() == 24);
     }
     CHECK(m.pending_jobs() == 0);
 }
@@ -290,7 +290,7 @@ TEST(test_manager_reschedules_outdated_mesh) {
     for (const MeshResult& r : meshes) {
         CHECK(r.pos == (ChunkPos{0, 6, 0}));
         CHECK(r.version == w.chunk(ChunkPos{0, 6, 0})->version);
-        CHECK(r.mesh.vertex_count() == 40);
+        CHECK(r.mesh.opaque.vertex_count() == 40);
     }
 }
 
@@ -314,7 +314,7 @@ TEST(test_manager_older_mesh_job_never_wins) {
     const std::vector<MeshResult> meshes = m.take_meshes(SIZE_MAX);
     CHECK(meshes.size() == 2);
     for (const MeshResult& r : meshes) {
-        if (r.pos == ChunkPos{0, 6, 0}) CHECK(r.mesh.vertex_count() == 20);
+        if (r.pos == ChunkPos{0, 6, 0}) CHECK(r.mesh.opaque.vertex_count() == 20);
         else CHECK(r.pos == (ChunkPos{1, 6, 0}));
     }
 }
