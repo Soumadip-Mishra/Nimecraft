@@ -171,8 +171,36 @@ TEST(test_raycast_far_coordinates) {
 }
 
 TEST(test_raycast_skips_non_solid) {
+    // Plan name kept; since the targeting fix only AIR and WATER are skipped (see the regress test).
     World w = flat_world();
     w.set(5, 80, 3, blk::AIR);
     w.set(5, 80, 5, blk::LEAVES);  // solid: leaves can be targeted
     CHECK(hit_at(raycast_voxel(w, Vector3{5.5f, 80.5f, 0.5f}, Vector3{0, 0, 1}, 10.f), 5, 80, 5));
+}
+
+TEST(test_regress_raycast_targets_non_solid) {
+    // A placed TORCH could never be broken: the raycast only targeted solid blocks. Every block
+    // except AIR and WATER is targeted now (TORCH, GLOWCAP, TALL_GRASS, FLOWER are not solid).
+    for (const BlockId b : {blk::TORCH, blk::GLOWCAP, blk::TALL_GRASS, blk::FLOWER}) {
+        World w = flat_world();
+        w.set(5, 80, 5, b);
+        const RayHit h = raycast_voxel(w, Vector3{5.5f, 80.5f, 0.5f}, Vector3{0, 0, 1}, 10.f);
+        CHECK(hit_at(h, 5, 80, 5));
+        CHECK(normal_is(h, 0, 0, -1));
+        CHECK_NEAR(h.distance, 4.5, 1e-4);
+    }
+    // WATER is still looked through: the STONE behind it is the target.
+    World w = flat_world();
+    w.set(5, 80, 3, blk::WATER);
+    w.set(5, 80, 5, blk::STONE);
+    CHECK(hit_at(raycast_voxel(w, Vector3{5.5f, 80.5f, 0.5f}, Vector3{0, 0, 1}, 10.f), 5, 80, 5));
+    // An eye inside a non-solid block (walked into a torch cell) looks past it: only a solid
+    // block around the eye is targeted with distance 0.
+    World g = flat_world();
+    g.set(5, 80, 5, blk::TORCH);
+    g.set(5, 80, 8, blk::STONE);
+    const RayHit past = raycast_voxel(g, Vector3{5.5f, 80.5f, 5.5f}, Vector3{0, 0, 1}, 10.f);
+    CHECK(hit_at(past, 5, 80, 8));
+    CHECK(normal_is(past, 0, 0, -1));
+    CHECK_NEAR(past.distance, 2.5, 1e-4);
 }

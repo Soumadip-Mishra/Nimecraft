@@ -13,6 +13,13 @@ bool solid_in_world(const World& w, int x, int y, int z) {
     return y >= 0 && y < WORLD_HEIGHT && block_def(w.get(x, y, z)).solid;
 }
 
+// Every block but AIR and WATER, so non-solid TORCH, GLOWCAP, and plants can be broken.
+bool targetable_in_world(const World& w, int x, int y, int z) {
+    if (y < 0 || y >= WORLD_HEIGHT) return false;
+    const BlockId b = w.get(x, y, z);
+    return b != blk::AIR && b != blk::WATER;
+}
+
 // Per-axis DDA state; double keeps the boundary distances exact enough far from the origin.
 struct Axis {
     int cell;
@@ -66,7 +73,7 @@ RayHit raycast_voxel(const World& w, Vector3 origin, Vector3 dir, float max_dist
         if (!(t <= max_dist)) return RayHit{};  // also stops a zero direction (t = infinity)
         a[k].cell += a[k].step;
         a[k].t_max += a[k].t_delta;
-        if (solid_in_world(w, a[0].cell, a[1].cell, a[2].cell)) {
+        if (targetable_in_world(w, a[0].cell, a[1].cell, a[2].cell)) {
             h.hit = true;
             h.x = a[0].cell;
             h.y = a[1].cell;

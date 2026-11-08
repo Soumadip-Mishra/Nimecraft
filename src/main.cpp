@@ -176,8 +176,11 @@ int run(const CliOptions& o) {
 
     // --smoke paces itself at 60 FPS instead of vsync: a compositor throttles a vsynced window it
     // considers hidden to about 1 frame per second, which would measure the desktop, not the game.
-    const unsigned vsync = o.smoke ? 0u : static_cast<unsigned>(FLAG_VSYNC_HINT);
-    SetConfigFlags(vsync | FLAG_MSAA_4X_HINT | FLAG_WINDOW_RESIZABLE);
+    // It also keeps running if the compositor iconifies the window; raylib otherwise blocks in
+    // EndDrawing until the next window event, and the smoke run never finishes.
+    const unsigned pacing = o.smoke ? static_cast<unsigned>(FLAG_WINDOW_ALWAYS_RUN)
+                                    : static_cast<unsigned>(FLAG_VSYNC_HINT);
+    SetConfigFlags(pacing | FLAG_MSAA_4X_HINT | FLAG_WINDOW_RESIZABLE);
     InitWindow(1280, 720, "Nimecraft");
     if (o.smoke) SetTargetFPS(60);
     SetExitKey(KEY_NULL);

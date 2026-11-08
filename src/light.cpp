@@ -246,18 +246,32 @@ void stitch_column_light(World& w, ColumnPos c) {
         {{c.x, c.z - 1}, bx, bz, bx, bz - 1, 1, 0},
     };
     for (Channel ch : {Channel::Sky, Channel::Block}) {
+        // Each column is already at a fixpoint on its own, and so is every border stitched before,
+        // so only a border cell that would raise the facing cell can change anything. Seeding just
+        // those gives the same light as seeding every lit border cell, without spreading from the
+        // thousands of open-sky cells that are equal on both sides.
         std::vector<Node> queue;
         for (const Border& b : borders) {
             if (!w.column_loaded(b.n)) continue;
-            for (int y = 0; y < WORLD_HEIGHT; ++y)
-                for (int t = 0; t < CHUNK; ++t)
-                    for (int side = 0; side < 2; ++side) {
-                        const int x = (side == 0 ? b.x0 : b.x1) + t * b.sx;
-                        const int z = (side == 0 ? b.z0 : b.z1) + t * b.sz;
-                        Ref r;
-                        cells.find(x, y, z, r);
-                        if (get(ch, r) > 0) queue.push_back(Node{x, y, z, 0});
+            const int lx0 = floor_mod(b.x0, CHUNK), lz0 = floor_mod(b.z0, CHUNK);
+            const int lx1 = floor_mod(b.x1, CHUNK), lz1 = floor_mod(b.z1, CHUNK);
+            for (int cy = 0; cy < SECTIONS; ++cy) {
+                Chunk* c0 = w.chunk(chunk_of(b.x0, cy * CHUNK, b.z0));  // loaded columns are whole
+                Chunk* c1 = w.chunk(chunk_of(b.x1, cy * CHUNK, b.z1));
+                for (int ly = 0; ly < CHUNK; ++ly)
+                    for (int t = 0; t < CHUNK; ++t) {
+                        const int i0 = Chunk::index(lx0 + t * b.sx, ly, lz0 + t * b.sz);
+                        const int i1 = Chunk::index(lx1 + t * b.sx, ly, lz1 + t * b.sz);
+                        const Ref r0{c0, i0}, r1{c1, i1};
+                        const int l0 = get(ch, r0), l1 = get(ch, r1);
+                        const int y = cy * CHUNK + ly;
+                        // Across a border is never straight down, so direction 0 (+X) stands for any.
+                        if (sent(ch, l0, 0, def_at(r1).opacity) > l1)
+                            queue.push_back(Node{b.x0 + t * b.sx, y, b.z0 + t * b.sz, 0});
+                        if (sent(ch, l1, 0, def_at(r0).opacity) > l0)
+                            queue.push_back(Node{b.x1 + t * b.sx, y, b.z1 + t * b.sz, 0});
                     }
+            }
         }
         spread(cells, ch, queue);
         mark_changed_dirty(cells, ch, log);

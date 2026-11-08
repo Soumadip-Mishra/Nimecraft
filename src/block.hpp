@@ -67,7 +67,7 @@ enum class Shape : uint8_t { Cube, Cross, Liquid };
 
 struct BlockDef {
     std::string_view name;
-    bool solid;      // collides and is targeted by the block raycast
+    bool solid;      // collides; the block raycast targets every block but AIR and WATER
     bool opaque;     // hides neighbor faces; true exactly when layer == Layer::Opaque
     bool breakable;
     std::array<Tile, 6> tiles;  // indexed by Face

@@ -26,6 +26,10 @@ void compute_column_light(Column& col);
 // its 4 horizontal neighbors, in both directions and onward through any loaded columns. Light only
 // rises. Marks dirty every loaded chunk whose mesh snapshot (the chunk plus a 1-cell border) holds a
 // changed cell. Does nothing if c is not loaded.
+// Seeds only the border cells whose light would raise the facing cell, which is exact only while
+// no loaded cell holds less light than a loaded neighbor sends it. Keep that true: every block
+// write into a loaded column goes through World::set (and so relight_block), and every column is
+// stitched right after insert_column.
 void stitch_column_light(World& w, ColumnPos c);
 
 // Main thread: called by World::set after the block at (x, y, z) changed from `before` to

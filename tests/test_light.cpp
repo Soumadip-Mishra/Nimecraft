@@ -624,3 +624,29 @@ TEST(test_light_edit_with_neighbor_column_source) {
     CHECK(bl(w, 14, 80, 8) == 12);
     CHECK(bl(w, 10, 80, 8) == 8);
 }
+
+TEST(test_regress_stitch_seeds_only_crossing_light) {
+    // Stitching seeds only the border cells whose light crosses into the neighbor (the fix for
+    // frame spikes: seeding every lit border cell cost about 1.4 ms per arriving column on the main
+    // thread). This guards that the narrower seeding gives the same light, not the timing itself:
+    // real terrain loaded in two orders must end with identical light, consistent everywhere.
+    const auto load_generated = [](World& w, ColumnPos c) {
+        Column col = generate_column(w.seed(), c);
+        compute_column_light(col);
+        w.insert_column(c, std::move(col));
+        stitch_column_light(w, c);
+    };
+    World rows(42), ring(42);
+    for (int cz = -1; cz <= 1; ++cz)
+        for (int cx = -1; cx <= 1; ++cx) load_generated(rows, ColumnPos{cx, cz});
+    // Corners first, then edges, then the middle: every border is stitched from the other side.
+    for (const ColumnPos c : {ColumnPos{-1, -1}, ColumnPos{1, 1}, ColumnPos{1, -1}, ColumnPos{-1, 1},
+                              ColumnPos{0, -1}, ColumnPos{0, 1}, ColumnPos{-1, 0}, ColumnPos{1, 0},
+                              ColumnPos{0, 0}})
+        load_generated(ring, c);
+    for (int cz = -1; cz <= 1; ++cz)
+        for (int cx = -1; cx <= 1; ++cx)
+            for (int cy = 0; cy < SECTIONS; ++cy)
+                CHECK(rows.chunk(ChunkPos{cx, cy, cz})->light == ring.chunk(ChunkPos{cx, cy, cz})->light);
+    CHECK(consistent(rows, -16, 0, -16, 31, 255, 31));
+}
