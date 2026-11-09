@@ -32,6 +32,9 @@ struct Chunk {
     // Saved creatures whose feet are in this chunk (region v3). Filled when a column is saved or
     // loaded; World::insert_column moves them out to World::take_arrived_mobs.
     std::vector<SavedMob> mobs;
+    // Per-block state by Chunk::index (region v4, M7 Task 2): WATER level, crop stage. 0 for every
+    // block that has none. Written through World::set.
+    std::array<uint8_t, CHUNK * CHUNK * CHUNK> meta{};
 
     // Local coordinates are in [0, CHUNK); the caller guarantees the range.
     static int index(int lx, int ly, int lz);  // lx + lz*16 + ly*256

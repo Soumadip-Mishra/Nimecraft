@@ -24,8 +24,8 @@ TEST(test_block_ids) {
     CHECK(blk::LEAVES == 6);
     CHECK(blk::PLANKS == 7);
     CHECK(blk::DEEPSTONE == 8);
-    CHECK(blk::COUNT == 35);  // M4 appended WORKBENCH, KILN, CRATE, GLASS; M5 BEDROLL, GRAVE_CAIRN
-    CHECK(T_COUNT == 49);     // M4: 7 station and glass tiles, 4 crack stages; M5: 4 bedroll and cairn tiles
+    CHECK(blk::COUNT == 38);  // M4 appended WORKBENCH, KILN, CRATE, GLASS; M5 BEDROLL, GRAVE_CAIRN; M7 3 plants
+    CHECK(T_COUNT == 55);     // M4: 7 station and glass tiles, 4 crack stages; M5: 4 bedroll and cairn tiles; M7: 2 saplings, 4 crop stages
     CHECK(PX == 0 && NX == 1 && PY == 2 && NY == 3 && PZ == 4 && NZ == 5);
 }
 
@@ -63,7 +63,14 @@ TEST(test_block_ids_m4) {
     CHECK(blk::KILN == 30);
     CHECK(blk::CRATE == 31);
     CHECK(blk::GLASS == 32);
-    CHECK(blk::COUNT == 35);
+}
+
+// M7 README: the appended plant ids.
+TEST(test_block_ids_m7) {
+    CHECK(blk::SAPLING == 35);
+    CHECK(blk::PINE_SAPLING == 36);
+    CHECK(blk::SUNROOT_CROP == 37);
+    CHECK(blk::COUNT == 38);
 }
 
 // M2 Task 1: LEAVES and PINE_LEAVES are Cutout, WATER and ICE Translucent, TALL_GRASS and FLOWER
@@ -73,7 +80,8 @@ TEST(test_block_ids_m4) {
 TEST(test_block_layers_shapes) {
     for (BlockId id = 1; id < blk::COUNT; ++id) {
         const BlockDef& d = block_def(id);
-        const bool cross = id == blk::TALL_GRASS || id == blk::FLOWER || id == blk::TORCH || id == blk::GLOWCAP;
+        const bool cross = id == blk::TALL_GRASS || id == blk::FLOWER || id == blk::TORCH || id == blk::GLOWCAP ||
+                           id == blk::SAPLING || id == blk::PINE_SAPLING || id == blk::SUNROOT_CROP;
         const bool cutout = id == blk::LEAVES || id == blk::PINE_LEAVES || id == blk::LANTERN || cross;
         const bool translucent = id == blk::WATER || id == blk::ICE || id == blk::GLASS;
         if (cutout) CHECK(d.layer == Layer::Cutout);
@@ -166,7 +174,8 @@ TEST(test_block_defs_complete) {
 TEST(test_block_flags) {
     for (BlockId id = 1; id < blk::COUNT; ++id) {
         const bool walk_through = id == blk::WATER || id == blk::TALL_GRASS || id == blk::FLOWER ||
-                                  id == blk::TORCH || id == blk::GLOWCAP;
+                                  id == blk::TORCH || id == blk::GLOWCAP || id == blk::SAPLING ||
+                                  id == blk::PINE_SAPLING || id == blk::SUNROOT_CROP;
         const bool see_through = walk_through || id == blk::LEAVES || id == blk::PINE_LEAVES ||
                                  id == blk::ICE || id == blk::LANTERN || id == blk::GLASS;
         CHECK(block_def(id).solid == !walk_through);
@@ -180,9 +189,9 @@ TEST(test_block_def_id_boundary) {
     CHECK(&block_def(blk::COUNT) == &block_def(blk::AIR));
     CHECK(&block_def(999) == &block_def(blk::AIR));
     CHECK(&block_def(65535) == &block_def(blk::AIR));
-    CHECK(&block_def(blk::COUNT - 1) == &block_def(blk::GRAVE_CAIRN));
+    CHECK(&block_def(blk::COUNT - 1) == &block_def(blk::SUNROOT_CROP));
     CHECK(&block_def(blk::GLASS) != &block_def(blk::AIR));
-    CHECK(block_def(blk::COUNT - 1).solid);
+    CHECK(block_def(blk::COUNT - 1).breakable);
 }
 
 TEST(test_block_names_distinct) {

@@ -22,11 +22,13 @@ enum Shade : uint8_t { SHADE_TOP = 255, SHADE_X = 204, SHADE_Z = 166, SHADE_BOTT
 struct Padded {
     std::array<BlockId, 18 * 18 * 18> b{};
     std::array<uint8_t, 18 * 18 * 18> light{};
+    std::array<uint8_t, 18 * 18 * 18> meta{};        // Chunk::meta; 0 outside loaded chunks
     BlockId at(int lx, int ly, int lz) const;        // lx, ly, lz in [-1, 16]
     uint8_t light_at(int lx, int ly, int lz) const;  // same range
+    uint8_t meta_at(int lx, int ly, int lz) const;   // same range
 };
 
-// Copies chunk p and its border, blocks and light. Below the world reads DEEPSTONE with no
+// Copies chunk p and its border, blocks, light, and meta. Below the world reads DEEPSTONE with no
 // light, above it AIR with sky 15, unloaded columns AIR with no light (blocks exactly as
 // World::get does).
 Padded snapshot(const World& w, ChunkPos p);  // main thread only
@@ -53,9 +55,10 @@ struct ChunkMesh {
 // - Cube, Opaque or Cutout: a face is drawn unless its neighbor is opaque.
 // - Cube or Liquid, Translucent: a face is drawn unless its neighbor is opaque or has the same id.
 // - Liquid: when the block above is not the same id, the top face and the top edges of the side
-//   faces sit at y + 0.875.
+//   faces sit at liquid_top(meta): a flowing level 1..7 at y + (8 - level) / 9, a source (0),
+//   falling water (8), and any other meta at y + 0.875.
 // - Cross: two diagonal quads, each emitted for both sides (16 vertices), shade SHADE_X, never
-//   culled.
+//   culled. SUNROOT_CROP uses tile T_SUNROOT_0 + its meta (stage), meta above 3 as 3.
 // AIR and unknown ids (>= blk::COUNT) are never meshed.
 // Smooth light and ambient occlusion (cube and liquid faces): a vertex touches 4 cells on the
 // face side - the face's neighbor cell, side1 and side2 (that cell stepped toward the vertex

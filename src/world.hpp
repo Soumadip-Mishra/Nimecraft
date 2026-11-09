@@ -23,6 +23,8 @@ public:
     // the arrival list (chunk order).
     void insert_column(ColumnPos c, Column col);
     std::vector<SavedMob> take_arrived_mobs();  // returns and clears the arrival list
+    // Every column inserted since the last call, in insertion order (repeats kept); clears the list.
+    std::vector<ColumnPos> take_arrived_columns();
     // Returns the column (empty Column if absent) and drops its chunks from the dirty set.
     Column remove_column(ColumnPos c);
     std::vector<ColumnPos> loaded_columns() const;  // unspecified order
@@ -35,7 +37,10 @@ public:
     // returns true and changes nothing. Otherwise marks the chunk modified and dirty, marks
     // dirty each loaded chunk whose mesh snapshot holds the block (the face, edge, and corner
     // neighbors it borders), removes the cell's block entity, and updates light (relight_block).
-    bool set(int x, int y, int z, BlockId b);
+    // `meta` is the cell's new Chunk::meta; the same block with a new meta is an edit too (version,
+    // modified, dirty) but keeps the block entity and the light.
+    bool set(int x, int y, int z, BlockId b, uint8_t meta = 0);
+    uint8_t meta(int x, int y, int z) const;  // 0 when unloaded or y is out of range
 
     // Block entities live in their chunk (Chunk::entities), so they leave and return with
     // remove_column / insert_column. nullptr when absent, unloaded, or y outside [0, 256).
@@ -55,4 +60,5 @@ private:
     std::unordered_map<ColumnPos, Column, ColumnPosHash> columns_;
     std::unordered_set<ChunkPos, ChunkPosHash> dirty_;
     std::vector<SavedMob> arrived_mobs_;
+    std::vector<ColumnPos> arrived_columns_;
 };

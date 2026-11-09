@@ -33,7 +33,9 @@ TEST(test_item_ids_pinned) {
     CHECK(itm::SWORD_SILVER == 293);
     CHECK(itm::HIDE_HELMET == 294);
     CHECK(itm::IRON_BOOTS == 301);
-    CHECK(itm::END == 302);
+    CHECK(itm::SUNROOT_SEEDS == 302);  // M7
+    CHECK(itm::SUNROOT == 303);
+    CHECK(itm::END == 304);
     // Block items share the block's id (M4 README block ids).
     CHECK(blk::WORKBENCH == 29);
     CHECK(blk::KILN == 30);
@@ -42,7 +44,7 @@ TEST(test_item_ids_pinned) {
     // M5 README.
     CHECK(blk::BEDROLL == 33);
     CHECK(blk::GRAVE_CAIRN == 34);
-    CHECK(blk::COUNT == 35);
+    CHECK(blk::COUNT == 38);
 }
 
 TEST(test_item_defs_table) {
@@ -64,6 +66,9 @@ TEST(test_item_defs_table) {
     CHECK(item_def(itm::SMALL_MEAT).food == 2);
     CHECK(item_def(itm::COOKED_SMALL_MEAT).food == 5);
     CHECK(item_def(itm::COOKED_SMALL_MEAT).cooked);
+    CHECK(item_def(itm::SUNROOT).food == 4);  // M7: eaten raw
+    CHECK(!item_def(itm::SUNROOT).cooked);
+    CHECK(item_def(itm::SUNROOT_SEEDS).food == 0);
     CHECK(item_def(itm::IRON_CHEST).armor == ArmorSlot::Chest);
     CHECK(item_def(itm::IRON_CHEST).armor_points == 6);
     CHECK(item_def(itm::HIDE_BOOTS).armor == ArmorSlot::Feet);

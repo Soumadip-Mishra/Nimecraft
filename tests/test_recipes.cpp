@@ -1,5 +1,6 @@
 // Tests for src/recipes.*: the recipe table, station detection, available recipes, crafting.
 #include "block.hpp"
+#include "block_entities.hpp"
 #include "chunk.hpp"
 #include "coords.hpp"
 #include "inventory.hpp"
@@ -282,4 +283,14 @@ TEST(test_craft_from_hotbar_and_inventory_slots) {
     CHECK(torch && craft(inv, *torch));
     CHECK(inv.count(blk::TORCH) == 4);
     CHECK(inv.slots[8].empty() || inv.slots[8].id == blk::TORCH);
+}
+
+// M7 Task 3: Sunroot is eaten raw; no kiln recipe takes it or its seeds.
+TEST(test_sunroot_not_smeltable) {
+    for (const SmeltRecipe& r : smelt_recipes())
+        for (const ItemStack& in : r.inputs) {
+            CHECK(in.id != itm::SUNROOT);
+            CHECK(in.id != itm::SUNROOT_SEEDS);
+        }
+    CHECK(!smelt_recipes().empty());
 }

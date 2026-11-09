@@ -80,6 +80,8 @@ constexpr std::array<ItemDef, OTHER_ITEMS> make_other_items() {
         armor("Iron Chestplate", ArmorSlot::Chest, 6),
         armor("Iron Leggings", ArmorSlot::Legs, 5),
         armor("Iron Boots", ArmorSlot::Feet, 2),
+        material("Sunroot Seeds"),
+        material("Sunroot", 4),
     }};
     for (std::size_t i = 0; i < d.size(); ++i) d[i].icon = static_cast<uint8_t>(i);
     return d;

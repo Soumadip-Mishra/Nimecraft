@@ -501,12 +501,22 @@ void place_feature(Column& col, ColumnPos c, const Feature& f) {
     if (fx < -FEATURE_MARGIN || fx >= CHUNK + FEATURE_MARGIN || fz < -FEATURE_MARGIN || fz >= CHUNK + FEATURE_MARGIN)
         return;
     const int ox = static_cast<int>(fx), oz = static_cast<int>(fz);
-    auto put = [&](int dx, int y, int dz, BlockId b, bool overwrite) {
-        const int lx = ox + dx, lz = oz + dz;
-        if (lx < 0 || lx >= CHUNK || lz < 0 || lz >= CHUNK || y < 0 || y >= WORLD_HEIGHT) return;
-        BlockId& cur = cell(col, lx, y, lz);
-        if (overwrite || cur == blk::AIR) cur = b;
-    };
+    // Glowcaps grow only on a cave floor that survived carving, ores, and geodes.
+    if (f.type == FeatureType::Glowcap &&
+        !(f.y >= 1 && f.y < WORLD_HEIGHT && ox >= 0 && ox < CHUNK && oz >= 0 && oz < CHUNK &&
+          cell(col, ox, f.y - 1, oz) == blk::STONE))
+        return;
+    for (const FeatureCell& fc : feature_cells(f)) {
+        const int lx = ox + fc.dx, lz = oz + fc.dz;
+        if (lx < 0 || lx >= CHUNK || lz < 0 || lz >= CHUNK || fc.y < 0 || fc.y >= WORLD_HEIGHT) continue;
+        BlockId& cur = cell(col, lx, fc.y, lz);
+        if (fc.overwrite || cur == blk::AIR) cur = fc.block;
+    }
+}
+
+std::vector<FeatureCell> feature_cells(const Feature& f) {
+    std::vector<FeatureCell> out;
+    auto put = [&out](int dx, int y, int dz, BlockId b, bool overwrite) { out.push_back(FeatureCell{dx, y, dz, b, overwrite}); };
     const int top = f.y + f.size;  // first layer above the trunk
     switch (f.type) {
         case FeatureType::OakTree:
@@ -537,12 +547,10 @@ void place_feature(Column& col, ColumnPos c, const Feature& f) {
             put(0, f.y, 0, blk::FLOWER, false);
             break;
         case FeatureType::Glowcap:
-            // Only on a cave floor that survived carving, ores, and geodes.
-            if (f.y >= 1 && f.y < WORLD_HEIGHT && ox >= 0 && ox < CHUNK && oz >= 0 && oz < CHUNK &&
-                cell(col, ox, f.y - 1, oz) == blk::STONE)
-                put(0, f.y, 0, blk::GLOWCAP, false);
+            put(0, f.y, 0, blk::GLOWCAP, false);
             break;
     }
+    return out;
 }
 
 std::vector<Geode> geodes_near(uint32_t seed, ColumnPos c) {

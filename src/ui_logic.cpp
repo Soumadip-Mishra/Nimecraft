@@ -105,7 +105,7 @@ IconFill icon_fill(float value, int i) {
 std::vector<ItemId> creative_palette() {
     std::vector<ItemId> out;
     for (BlockId b = 1; b < blk::COUNT; ++b)
-        if (b != blk::WATER && b != blk::GRAVE_CAIRN) out.push_back(b);
+        if (b != blk::WATER && b != blk::GRAVE_CAIRN && b != blk::SUNROOT_CROP) out.push_back(b);
     for (ItemId id = itm::STICK; id < itm::END; ++id) out.push_back(id);
     return out;
 }

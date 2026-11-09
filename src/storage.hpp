@@ -10,8 +10,11 @@
 //   health (Chunk::mobs of every chunk, in chunk order; hostile types are never written, and a
 //   hostile or unknown type, a non-finite float, health <= 0, feet outside the column, or feet y
 //   outside -64..320 makes the file corrupt, and such a creature is never written).
-//   Version 3 is written; versions 1, 2, and 3 load (v1 columns have no block entities, v1 and v2
-//   columns no creatures). A loaded creature goes into the chunk holding its feet (y clamped).
+//   then (version 4, M7) its block meta: u32 len, then len bytes holding, for each of the 16
+//   chunks in order, RLE pairs (u16 run >= 1, u8 value) of Chunk::meta covering exactly 4096 cells.
+//   Version 4 is written; versions 1 to 4 load (v1 columns have no block entities, v1 and v2
+//   columns no creatures, v1 to v3 columns meta 0). A loaded creature goes into the chunk holding
+//   its feet (y clamped).
 // world.meta: "key=value" lines: version=1, seed, px, py, pz, yaw, pitch, then the optional keys
 // added later (time, M3; mode, inv, armor, sel, M4; vitals, spawn, M5). Unknown keys are ignored; non-finite floats or missing required keys
 // make the file invalid.
@@ -31,10 +34,10 @@
 #include <utility>
 #include <vector>
 
-// Internal to RegionStore: one column's validated bytes, RLE blocks, its entity section, and its
-// creature section.
+// Internal to RegionStore: one column's validated bytes, RLE blocks, its entity section, its
+// creature section, and its meta section.
 struct RegionColumn {
-    std::vector<uint8_t> blocks, entities, mobs;
+    std::vector<uint8_t> blocks, entities, mobs, meta;
 };
 
 class RegionStore {

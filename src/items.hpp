@@ -21,7 +21,8 @@ constexpr ItemId STICK = 256, COAL = 257, COPPER_INGOT = 258, TIN_INGOT = 259, B
     SWORD_SILVER = 293,
     HIDE_HELMET = 294, HIDE_CHEST = 295, HIDE_LEGS = 296, HIDE_BOOTS = 297,
     IRON_HELMET = 298, IRON_CHEST = 299, IRON_LEGS = 300, IRON_BOOTS = 301,
-    END = 302;
+    SUNROOT_SEEDS = 302, SUNROOT = 303,
+    END = 304;
 // clang-format on
 }  // namespace itm
 

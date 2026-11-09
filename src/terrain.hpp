@@ -159,6 +159,17 @@ std::vector<Feature> features_near(uint32_t seed, ColumnPos c, int margin = 3);
 // Flower: one block at y.
 void place_feature(Column& col, ColumnPos c, const Feature& f);
 
+// One cell a feature writes: offset from the feature's (x, z), absolute y, the block, and whether it
+// overwrites (logs) or goes only into AIR (everything else).
+struct FeatureCell {
+    int dx, y, dz;
+    BlockId block;
+    bool overwrite;
+};
+// The cells of f in the order place_feature writes them (the shapes above), unclipped. A Glowcap
+// gives its one cell without the floor rule. Also used to grow saplings in a live World (M7).
+std::vector<FeatureCell> feature_cells(const Feature& f);
+
 // All 16 chunks of column pos, each non-null with pos set and modified == false.
 // Layers for ground height h and the cell's biome: y = 0 DEEPSTONE, STONE up to the top 4 blocks
 // h-3..h, which are: Ocean one of SAND/GRAVEL/CLAY by hash2(seed ^ 0x0CEA, x, z) % 3; Desert

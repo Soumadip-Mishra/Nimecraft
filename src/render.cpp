@@ -111,6 +111,7 @@ constexpr Rgb GRASS{96, 158, 56}, DIRT{128, 92, 62}, STONE{122, 124, 128}, SAND{
               SNOW{236, 240, 246}, ICE{150, 192, 236}, SANDSTONE{206, 186, 128}, CACTUS{62, 126, 56},
               SPINE{220, 214, 170}, PINE_BARK{72, 52, 38}, PINE_WOOD{168, 136, 92},
               PINE_LEAF{36, 84, 56}, PETAL{208, 76, 118}, POLLEN{236, 198, 64}, QUARTZ{230, 224, 236},
+              SUNROOT_GOLD{232, 166, 46},
               COAL{38, 38, 42}, COPPER{198, 112, 62}, TIN{190, 196, 204}, IRON{206, 164, 132},
               SILVER{232, 238, 246}, FLAME{238, 136, 40}, FLAME_CORE{255, 240, 170},
               IRON_FRAME{58, 58, 64}, GLOW{246, 186, 92}, STEM{214, 210, 190}, GLOWCAP_TEAL{64, 196, 180},
@@ -368,6 +369,37 @@ Rgb tile_pixel(int t, int x, int y) {
         if (pixel_hash(x, y, salt + 9) % 13 == 0) return noisy(MOSS, x, y, salt, 6);
         return noisy(course % 2 == 0 ? shade(STONE, 104) : shade(STONE, 92), x, y, salt, 8);
     }
+    case T_SAPLING: {
+        // A thin stem under a round, gappy tuft of leaves.
+        if ((x == 7 || x == 8) && y >= 9) return noisy(BARK, x, y, salt, 8);
+        const int dx = 2 * x - 15, dy = 2 * y - 12;  // tuft centred at (7.5, 6)
+        if (dx * dx + dy * dy <= 100 && pixel_hash(x, y, salt + 4) % 6 != 0)
+            return noisy(pixel_hash(x, y, salt) % 4 == 0 ? shade(LEAF, 125) : LEAF, x, y, salt, 8);
+        return CLEAR;
+    }
+    case T_PINE_SAPLING: {
+        // A stubby trunk under a narrow cone of needles.
+        if ((x == 7 || x == 8) && y >= 12) return noisy(PINE_BARK, x, y, salt, 8);
+        const int half = (y - 1) / 2;  // widens going down, rows 2..11
+        if (y >= 2 && y <= 11 && std::abs(2 * x - 15) <= 2 * half + 1)
+            return noisy(y % 3 == 0 ? shade(PINE_LEAF, 75) : PINE_LEAF, x, y, salt, 8);
+        return CLEAR;
+    }
+    case T_SUNROOT_0:
+    case T_SUNROOT_1:
+    case T_SUNROOT_2:
+    case T_SUNROOT_3: {
+        // Four shoots that grow 3 px taller each stage; the ripe stage opens golden heads.
+        const int stage = t - T_SUNROOT_0;
+        const int shoot = x == 3 ? 0 : (x == 6 ? 1 : (x == 9 ? 2 : (x == 12 ? 3 : -1)));
+        const int top = 12 - 3 * stage + (shoot == 1 || shoot == 2 ? 0 : 2);
+        if (stage == 3 && shoot >= 0 && std::abs(y - top + 1) <= 1) return noisy(SUNROOT_GOLD, x, y, salt, 10);
+        if (stage == 3 && (x == 2 || x == 4 || x == 5 || x == 7 || x == 8 || x == 10 || x == 11 || x == 13) &&
+            y == top - 1 && pixel_hash(x, 0, salt) % 2 == 0)
+            return noisy(SUNROOT_GOLD, x, y, salt, 10);
+        if (shoot >= 0 && y >= top) return noisy(shade(GRASS, 85 + (15 - y) * 2), x, y, salt, 6);
+        return CLEAR;
+    }
     default: return Rgb{255, 0, 255};  // unused atlas cell
     }
 }
@@ -376,7 +408,7 @@ Rgb tile_pixel(int t, int x, int y) {
 
 constexpr Rgb HANDLE{124, 88, 52}, BRONZE{204, 146, 70}, IRON_METAL{206, 208, 214}, HIDE_LEATHER{150, 100, 62},
               MEAT_RAW{214, 92, 102}, MEAT_COOKED{138, 78, 44}, FAT{246, 226, 214}, WOOL_WHITE{238, 236, 228},
-              FIBER_GREEN{120, 168, 74}, SILK_WHITE{232, 236, 244}, GLOOM{86, 52, 120};
+              FIBER_GREEN{120, 168, 74}, SILK_WHITE{232, 236, 244}, GLOOM{86, 52, 120}, SEED_TAN{206, 178, 118};
 
 // Head colors by tier: 1 wood (planks), 2 stone, 3 copper, 4 bronze, 5 iron; 6 = silver.
 Rgb tier_color(int tier) {
@@ -446,7 +478,7 @@ Rgb item_pixel(int i, int x, int y) {
         const bool edge = tool_part(kind, x + 1, y) != Part::Head || tool_part(kind, x, y - 1) != Part::Head;
         return noisy(shade(tier_color(tier), edge ? 72 : 108), x, y, 17, 4);
     }
-    if (i >= ARMOR0 && i < itm::END - itm::STICK) {
+    if (i >= ARMOR0 && i <= itm::IRON_BOOTS - itm::STICK) {
         const int k = i - ARMOR0;  // 0..7: hide cap..boots, iron helmet..boots
         if (!armor_shape(k % 4, x, y)) return CLEAR;
         const Rgb base = k < 4 ? HIDE_LEATHER : IRON_METAL;
@@ -510,6 +542,23 @@ Rgb item_pixel(int i, int x, int y) {
         const bool pile = y >= 9 && std::abs(dx) <= (y - 8) * 3;
         const bool mote = y < 9 && pixel_hash(x, y, salt) % 9 == 0;
         return pile || mote ? noisy(GLOOM, x, y, salt, 14) : CLEAR;
+    }
+    case itm::SUNROOT_SEEDS: {
+        // A scatter of plump seeds, each an oval with a dark tip.
+        constexpr int SEEDS[5][2] = {{4, 5}, {9, 4}, {6, 9}, {11, 9}, {8, 13}};
+        for (const auto& s : SEEDS) {
+            const int sx = x - s[0], sy = y - s[1];
+            if (sx * sx * 4 + sy * sy * 9 <= 18) return sy == -1 ? shade(SEED_TAN, 60) : noisy(SEED_TAN, x, y, salt, 8);
+        }
+        return CLEAR;
+    }
+    case itm::SUNROOT: {
+        // A golden taproot narrowing downward under a crown of leaves.
+        const int half = (15 - y) / 3;  // root rows 6..14
+        if (y >= 6 && y <= 14 && std::abs(dx) <= 2 * half + 1)
+            return noisy(y % 3 == 0 ? shade(SUNROOT_GOLD, 80) : SUNROOT_GOLD, x, y, salt, 8);
+        const bool leaf = y >= 1 && y <= 5 && (x == 5 + y / 2 || x == 10 - y / 2 || x == 7 || x == 8);
+        return leaf ? noisy(FIBER_GREEN, x, y, salt, 8) : CLEAR;
     }
     default: return Rgb{255, 0, 255};
     }

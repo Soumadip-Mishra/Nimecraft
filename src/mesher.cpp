@@ -9,7 +9,14 @@
 namespace {
 
 constexpr int PAD = CHUNK + 2;
-constexpr float LIQUID_TOP = 0.875f;  // top of a liquid with no same liquid above
+constexpr float LIQUID_TOP = 0.875f;  // top of a liquid source or fall with no same liquid above
+constexpr int LIQUID_LEVELS = 9;      // a flowing level L (1..7) tops out at (8 - L) / 9
+constexpr int CROP_TILES = 4;         // T_SUNROOT_0..3, one per crop stage
+
+float liquid_top(uint8_t meta) {
+    if (meta >= 1 && meta <= 7) return static_cast<float>(8 - meta) / LIQUID_LEVELS;
+    return LIQUID_TOP;
+}
 constexpr float DIAG = 0.70710678f;   // 1 / sqrt(2), the cross-plant normal component
 
 std::size_t pad_index(int lx, int ly, int lz) {
@@ -165,6 +172,10 @@ uint8_t Padded::light_at(int lx, int ly, int lz) const {
     return light[pad_index(lx, ly, lz)];
 }
 
+uint8_t Padded::meta_at(int lx, int ly, int lz) const {
+    return meta[pad_index(lx, ly, lz)];
+}
+
 std::size_t MeshData::vertex_count() const {
     return positions.size() / 3;
 }
@@ -189,7 +200,7 @@ Padded snapshot(const World& w, ChunkPos p) {
             const int sz = side_of(lz);
             for (int lx = -1; lx <= CHUNK; ++lx) {
                 BlockId id = blk::AIR;
-                uint8_t light = 0;
+                uint8_t light = 0, meta = 0;
                 if (wy < 0) {
                     id = blk::DEEPSTONE;
                 } else if (wy >= WORLD_HEIGHT) {
@@ -201,10 +212,12 @@ Padded snapshot(const World& w, ChunkPos p) {
                         const int i = Chunk::index(lx - sx * CHUNK, ly - sy * CHUNK, lz - sz * CHUNK);
                         id = c->blocks[static_cast<std::size_t>(i)];
                         light = c->light[static_cast<std::size_t>(i)];
+                        meta = c->meta[static_cast<std::size_t>(i)];
                     }
                 }
                 pad.b[pad_index(lx, ly, lz)] = id;
                 pad.light[pad_index(lx, ly, lz)] = light;
+                pad.meta[pad_index(lx, ly, lz)] = meta;
             }
         }
     }
@@ -228,13 +241,16 @@ ChunkMesh build_mesh(const Padded& pad, ChunkPos p) {
                     const VertexColor own{static_cast<uint8_t>((l >> 4) * LIGHT_SCALE),
                                           static_cast<uint8_t>((l & 0x0F) * LIGHT_SCALE), SHADE_X, 3};
                     const VertexColor colors[4] = {own, own, own, own};
+                    Tile tile = def.tiles[PX];
+                    if (id == blk::SUNROOT_CROP)
+                        tile = static_cast<Tile>(T_SUNROOT_0 + std::min<int>(pad.meta_at(lx, ly, lz), CROP_TILES - 1));
                     for (const CrossSpec& q : CROSS)
-                        emit_quad(m, q.corners, Normal{q.nx, 0.f, q.nz}, colors, def.tiles[PX], bx, by, bz, 1.f);
+                        emit_quad(m, q.corners, Normal{q.nx, 0.f, q.nz}, colors, tile, bx, by, bz, 1.f);
                     continue;
                 }
                 const bool translucent = def.layer == Layer::Translucent;
                 const float top =
-                    def.shape == Shape::Liquid && pad.at(lx, ly + 1, lz) != id ? LIQUID_TOP : 1.f;
+                    def.shape == Shape::Liquid && pad.at(lx, ly + 1, lz) != id ? liquid_top(pad.meta_at(lx, ly, lz)) : 1.f;
                 for (std::size_t f = 0; f < 6; ++f) {
                     const FaceSpec& spec = FACES[f];
                     const BlockId n = pad.at(lx + spec.dx, ly + spec.dy, lz + spec.dz);

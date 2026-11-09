@@ -25,7 +25,9 @@ std::optional<ItemStack> block_drop(BlockId b, const ItemStack& held, uint32_t r
 // ItemStack{}) when damage reaches durability. Anything else is unchanged.
 void wear_tool(ItemStack& held);
 
-// What breaking b (holding entity `be`, or nullptr) gives. Survival: be's contents
-// (block_entity_contents), then block_drop(b, held, rng) if any, and wear_tool(held) when b has
-// hardness > 0. Creative: nothing, and held is unchanged. An unbreakable b gives nothing in both.
-std::vector<ItemStack> break_drops(BlockId b, const BlockEntity* be, ItemStack& held, GameMode mode, uint32_t rng);
+// What breaking b (holding entity `be`, or nullptr; its Chunk::meta `meta`) gives. Survival: be's
+// contents (block_entity_contents), then block_drop(b, held, rng) if any, then
+// growth_drops(b, meta, rng) (M7), and wear_tool(held) when b has hardness > 0. Creative: nothing,
+// and held is unchanged. An unbreakable b gives nothing in both.
+std::vector<ItemStack> break_drops(BlockId b, const BlockEntity* be, ItemStack& held, GameMode mode, uint32_t rng,
+                                   uint8_t meta = 0);

@@ -1,5 +1,7 @@
 #include "mining.hpp"
 
+#include "growth.hpp"
+
 #include <limits>
 
 namespace {
@@ -55,12 +57,14 @@ void wear_tool(ItemStack& held) {
     if (held.damage >= d.durability) held = ItemStack{};
 }
 
-std::vector<ItemStack> break_drops(BlockId b, const BlockEntity* be, ItemStack& held, GameMode mode, uint32_t rng) {
+std::vector<ItemStack> break_drops(BlockId b, const BlockEntity* be, ItemStack& held, GameMode mode, uint32_t rng,
+                                   uint8_t meta) {
     std::vector<ItemStack> out;
     const BlockDef& d = block_def(b);
     if (mode == GameMode::Creative || !d.breakable) return out;
     if (be != nullptr) out = block_entity_contents(*be);
     if (const std::optional<ItemStack> drop = block_drop(b, held, rng)) out.push_back(*drop);
+    for (const ItemStack& s : growth_drops(b, meta, rng)) out.push_back(s);
     if (d.hardness > 0.f) wear_tool(held);
     return out;
 }

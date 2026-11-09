@@ -1,7 +1,8 @@
 // One running game: world load and save, the per-frame loop, input, mining and placing, item
 // entities, kilns, the inventory, crafting, kiln, and crate screens, Creative mode, survival
 // (vitals, eating, fall damage, death, grave cairns, bedroll respawn, sleeping), creatures
-// (AI, spawning, despawning, melee, thorns, loot), and the HUD.
+// (AI, spawning, despawning, melee, thorns, loot), block ticks (flowing water, falling sand and
+// gravel, plant growth, planting), and the HUD.
 // Device module (window, input, clock): decisions live in the tested logic modules; this class only
 // wires them to the window. Covered by --smoke and the Manual checks.
 #pragma once
@@ -17,6 +18,7 @@
 #include "raycast.hpp"
 #include "render.hpp"
 #include "storage.hpp"
+#include "ticks.hpp"
 #include "ui_draw.hpp"
 #include "ui_logic.hpp"
 #include "vitals.hpp"
@@ -71,6 +73,7 @@ private:
     void open_screen(Screen s, BlockPos at = BlockPos{0, 0, 0});
     void close_screen();
     void tick_kilns(float dt);
+    void update_block_ticks(float dt);
     std::vector<SlotRef> screen_slots();
     void screen_click(const std::vector<SlotRef>& slots);
     void shift_move(const SlotRef& from);
@@ -102,6 +105,12 @@ private:
     uint32_t loot_rng_ = 0x7F4A7C15u;
     std::optional<uint32_t> target_mob_;  // the creature under the crosshair within reach
     int attacks_since_tick_ = 0;
+
+    // Block ticks (20 per second): scheduled ticks and random ticks.
+    TickScheduler ticks_;
+    TickClock tick_clock_;
+    uint32_t random_tick_rng_ = 0x1B873593u;
+    std::vector<BlockPos> random_tick_buf_;
 
     // Survival.
     Vitals vitals_;

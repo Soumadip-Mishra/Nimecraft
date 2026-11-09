@@ -5,6 +5,8 @@
 #include "chunk.hpp"
 #include "coords.hpp"
 #include "death.hpp"
+#include "fluids.hpp"
+#include "growth.hpp"
 #include "mining.hpp"
 #include "mob_models.hpp"
 #include "platform.hpp"
@@ -215,7 +217,11 @@ Game::Game(const CliOptions& o)
     if (captured_) DisableCursor();
     start_ = GetTime();
     // A column leaving memory takes its creatures along: passive ones are saved with it.
-    mgr_.set_unload_hook([this](ColumnPos c, Column& col) { stash_mobs(col, mobs_.take_column(c)); });
+    // Its scheduled block ticks are forgotten.
+    mgr_.set_unload_hook([this](ColumnPos c, Column& col) {
+        stash_mobs(col, mobs_.take_column(c));
+        ticks_.drop_column(c);
+    });
 }
 
 Game::~Game() {
@@ -470,9 +476,13 @@ void Game::break_block(BlockPos p, bool survival_drops) {
     if (!block_def(b).breakable || b == blk::AIR) return;
     const Vector3 center{p.x + 0.5f, p.y + 0.25f, p.z + 0.5f};
     const GameMode mode = survival_drops ? GameMode::Survival : GameMode::Creative;
-    for (const ItemStack& s : break_drops(b, world_.block_entity(p), inv_.held(), mode, drop_rng_++ * 0x9E3779B9u))
+    for (const ItemStack& s :
+         break_drops(b, world_.block_entity(p), inv_.held(), mode, drop_rng_++ * 0x9E3779B9u, world_.meta(p.x, p.y, p.z)))
         items_.spawn(center, s);
-    if (world_.set(p.x, p.y, p.z, blk::AIR)) mgr_.flush_edits();
+    if (world_.set(p.x, p.y, p.z, blk::AIR)) {
+        mgr_.flush_edits();
+        schedule_around(ticks_, p, FLUID_DELAY);  // water may flow in, blocks above may fall
+    }
     if (screen_ != Screen::None && screen_ != Screen::Inventory && p == open_pos_) close_screen();
     mining_ = false;
     mine_progress_ = 0.f;
@@ -535,15 +545,20 @@ void Game::use_block(const RayHit& hit) {
         }
     }
     ItemStack& held = inv_.held();
-    if (held.empty() || held.id >= blk::COUNT || held.id == blk::WATER) return;  // only blocks are placed
+    const bool plant = !held.empty() && is_plant_item(held.id);
+    // Only blocks are placed; seeds and saplings are planted on GRASS or DIRT.
+    if (!plant && (held.empty() || held.id >= blk::COUNT || held.id == blk::WATER)) return;
     const int x = hit.x + hit.nx, y = hit.y + hit.ny, z = hit.z + hit.nz;
     const bool has_face = hit.nx != 0 || hit.ny != 0 || hit.nz != 0;
     if (!has_face || world_.get(x, y, z) != blk::AIR || player_intersects_block(player_, x, y, z)) return;
-    const BlockId placed = held.id;
+    const std::optional<BlockId> planted = plant ? plant_from(held.id, world_.get(x, y - 1, z)) : std::nullopt;
+    if (plant && !planted) return;
+    const BlockId placed = plant ? *planted : held.id;
     if (!world_.set(x, y, z, placed)) return;
     if (placed == blk::KILN) world_.set_block_entity(BlockPos{x, y, z}, KilnState{});
     if (placed == blk::CRATE) world_.set_block_entity(BlockPos{x, y, z}, CrateState{});
     mgr_.flush_edits();
+    schedule_around(ticks_, BlockPos{x, y, z}, FLUID_DELAY);
     if (mode_ == GameMode::Survival && --held.count == 0) held = ItemStack{};
 }
 
@@ -571,6 +586,21 @@ void Game::tick_kilns(float dt) {
     for (const BlockPos& p : world_.block_entity_positions())
         if (BlockEntity* be = world_.block_entity(p))
             if (auto* k = std::get_if<KilnState>(be)) kiln_tick(*k, dt);
+}
+
+void Game::update_block_ticks(float dt) {
+    const int steps = tick_clock_.advance(dt);
+    std::size_t budget = MAX_SCHEDULED_TICKS_PER_FRAME;
+    for (int s = steps - 1; s >= 0; --s) {
+        const uint64_t now = tick_clock_.now - static_cast<uint64_t>(s);
+        const std::vector<BlockPos> due = ticks_.due(now, budget);
+        budget -= due.size();
+        for (BlockPos p : due) block_tick(world_, ticks_, p);
+    }
+    // Random ticks for every step at once: one column list per frame, the same count per chunk.
+    if (steps == 0) return;
+    random_ticks(world_, random_tick_rng_, RANDOM_TICKS_PER_CHUNK * steps, random_tick_buf_);
+    for (BlockPos p : random_tick_buf_) random_tick_block(world_, p, random_tick_rng_);
 }
 
 std::vector<Game::SlotRef> Game::screen_slots() {
@@ -846,6 +876,7 @@ bool Game::frame() {
 
     mgr_.update(!spawned_ ? spawn_col_ : (respawning_ ? respawn_col_ : column_at(player_.pos)));
     mobs_.restore(world_.take_arrived_mobs(), spawn_rng_);  // creatures saved with loaded columns
+    for (ColumnPos c : world_.take_arrived_columns()) schedule_column_water(world_, ticks_, c);
     if (!spawned_ && mgr_.column_ready(spawn_col_)) {
         if (!meta_) player_ = spawn_player(world_);
         spawned_ = true;
@@ -868,6 +899,7 @@ bool Game::frame() {
         if (alive) items_.collect(player_.pos, inv_);
         update_mobs(dt, alive, hit_mob);
         tick_kilns(dt);
+        update_block_ticks(dt);
         if (screen_ == Screen::Kiln || screen_ == Screen::Crate) {
             const Vector3 c{open_pos_.x + 0.5f, open_pos_.y + 0.5f, open_pos_.z + 0.5f};
             if (world_.block_entity(open_pos_) == nullptr || Vector3Distance(player_eye(player_), c) > SCREEN_REACH)

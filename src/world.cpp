@@ -26,11 +26,18 @@ void World::insert_column(ColumnPos c, Column col) {
         mobs.clear();
     }
     columns_.insert_or_assign(c, std::move(col));
+    arrived_columns_.push_back(c);
 }
 
 std::vector<SavedMob> World::take_arrived_mobs() {
     std::vector<SavedMob> out;
     out.swap(arrived_mobs_);
+    return out;
+}
+
+std::vector<ColumnPos> World::take_arrived_columns() {
+    std::vector<ColumnPos> out;
+    out.swap(arrived_columns_);
     return out;
 }
 
@@ -69,18 +76,24 @@ BlockId World::get(int x, int y, int z) const {
     return c->get(floor_mod(x, CHUNK), floor_mod(y, CHUNK), floor_mod(z, CHUNK));
 }
 
-bool World::set(int x, int y, int z, BlockId b) {
+bool World::set(int x, int y, int z, BlockId b, uint8_t meta) {
     if (y < 0 || y >= WORLD_HEIGHT) return false;
     const ChunkPos p = chunk_of(x, y, z);
     Chunk* c = chunk(p);
     if (c == nullptr) return false;
     const int lx = floor_mod(x, CHUNK), ly = floor_mod(y, CHUNK), lz = floor_mod(z, CHUNK);
+    const auto i = static_cast<std::size_t>(Chunk::index(lx, ly, lz));
     const BlockId before = c->get(lx, ly, lz);
-    if (before == b) return true;
+    if (before == b && c->meta[i] == meta) return true;
 
-    c->set(lx, ly, lz, b);
+    c->meta[i] = meta;
     c->modified = true;
-    c->entities.erase(static_cast<uint16_t>(Chunk::index(lx, ly, lz)));
+    if (before == b) {
+        ++c->version;
+    } else {
+        c->set(lx, ly, lz, b);
+        c->entities.erase(static_cast<uint16_t>(i));
+    }
     // Every chunk whose mesh snapshot (the chunk plus a 1-cell border) holds the cell is stale:
     // face culling reads the face neighbors, and ambient occlusion the edge and corner ones too.
     const int x0 = lx == 0 ? -1 : 0, x1 = lx == CHUNK - 1 ? 1 : 0;
@@ -89,8 +102,15 @@ bool World::set(int x, int y, int z, BlockId b) {
     for (int dy = y0; dy <= y1; ++dy)
         for (int dz = z0; dz <= z1; ++dz)
             for (int dx = x0; dx <= x1; ++dx) mark_dirty(ChunkPos{p.x + dx, p.y + dy, p.z + dz});
-    relight_block(*this, x, y, z, before, b);
+    if (before != b) relight_block(*this, x, y, z, before, b);
     return true;
+}
+
+uint8_t World::meta(int x, int y, int z) const {
+    if (y < 0 || y >= WORLD_HEIGHT) return 0;
+    const Chunk* c = chunk(chunk_of(x, y, z));
+    if (c == nullptr) return 0;
+    return c->meta[static_cast<std::size_t>(Chunk::index(floor_mod(x, CHUNK), floor_mod(y, CHUNK), floor_mod(z, CHUNK)))];
 }
 
 std::vector<ChunkPos> World::take_dirty() {

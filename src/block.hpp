@@ -17,7 +17,8 @@ constexpr BlockId AIR = 0, GRASS = 1, DIRT = 2, STONE = 3, SAND = 4, LOG = 5, LE
                   FLOWER = 19, COAL_ORE = 20, COPPER_ORE = 21, TIN_ORE = 22, IRON_ORE = 23,
                   SILVER_ORE = 24, QUARTZ = 25, TORCH = 26, LANTERN = 27, GLOWCAP = 28,
                   WORKBENCH = 29, KILN = 30, CRATE = 31, GLASS = 32, BEDROLL = 33, GRAVE_CAIRN = 34,
-                  COUNT = 35;
+                  SAPLING = 35, PINE_SAPLING = 36, SUNROOT_CROP = 37,
+                  COUNT = 38;
 }
 
 enum Face : uint8_t { PX, NX, PY, NY, PZ, NZ };
@@ -73,6 +74,12 @@ enum Tile : uint8_t {
     T_BEDROLL_SIDE,
     T_CAIRN_TOP,
     T_CAIRN_SIDE,
+    T_SAPLING,  // M7
+    T_PINE_SAPLING,
+    T_SUNROOT_0,  // crop stages 0..3 (Chunk::meta), in order
+    T_SUNROOT_1,
+    T_SUNROOT_2,
+    T_SUNROOT_3,
     T_COUNT
 };
 

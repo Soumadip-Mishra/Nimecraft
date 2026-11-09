@@ -195,8 +195,12 @@ TEST(test_double_tap) {
 
 TEST(test_creative_palette) {
     const std::vector<ItemId> p = creative_palette();
-    // Every block but AIR, WATER, and GRAVE_CAIRN (only made by dying), then every other item.
-    CHECK(p.size() == static_cast<std::size_t>(blk::COUNT - 3 + (itm::END - itm::STICK)));
+    // Every block but AIR, WATER, GRAVE_CAIRN (only made by dying), and SUNROOT_CROP (planted from
+    // seeds), then every other item.
+    CHECK(p.size() == static_cast<std::size_t>(blk::COUNT - 4 + (itm::END - itm::STICK)));
+    CHECK(std::find(p.begin(), p.end(), blk::SUNROOT_CROP) == p.end());
+    CHECK(std::find(p.begin(), p.end(), blk::SAPLING) != p.end());
+    CHECK(std::find(p.begin(), p.end(), itm::SUNROOT_SEEDS) != p.end());
     CHECK(std::find(p.begin(), p.end(), blk::AIR) == p.end());
     CHECK(std::find(p.begin(), p.end(), blk::WATER) == p.end());
     CHECK(std::find(p.begin(), p.end(), blk::GRAVE_CAIRN) == p.end());

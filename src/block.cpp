@@ -48,6 +48,10 @@ constexpr std::array<BlockDef, blk::COUNT> BASE{{
     {"Glass", true, false, true, all(T_GLASS), Layer::Translucent, Shape::Cube, 0, 0},
     {"Bedroll", true, true, true, top_bottom_side(T_BEDROLL_TOP, T_PLANKS, T_BEDROLL_SIDE)},
     {"Grave Cairn", true, true, true, top_bottom_side(T_CAIRN_TOP, T_CAIRN_TOP, T_CAIRN_SIDE)},
+    {"Sapling", false, false, true, all(T_SAPLING), Layer::Cutout, Shape::Cross, 0, 0},
+    {"Pine Sapling", false, false, true, all(T_PINE_SAPLING), Layer::Cutout, Shape::Cross, 0, 0},
+    // Its tiles show stage 0; the mesher picks T_SUNROOT_0 + stage (see mesher.hpp).
+    {"Sunroot Crop", false, false, true, all(T_SUNROOT_0), Layer::Cutout, Shape::Cross, 0, 0},
 }};
 
 // Hardness, tool, min tier, and drops (M4 Task 3). Blocks the task's table leaves out use the
@@ -91,6 +95,7 @@ constexpr std::array<BlockDef, blk::COUNT> with_mining(std::array<BlockDef, blk:
     for (BlockId id : {blk::TALL_GRASS, blk::FLOWER, blk::TORCH, blk::GLOWCAP}) mine(id, 0.f, None, 0);
     mine(blk::BEDROLL, 0.4f, None, 0);      // M5
     mine(blk::GRAVE_CAIRN, 0.5f, None, 0);  // M5: by hand, so its items always drop
+    for (BlockId id : {blk::SAPLING, blk::PINE_SAPLING, blk::SUNROOT_CROP}) mine(id, 0.f, None, 0);  // M7: plants
 
     drop(blk::GRASS, blk::DIRT, 1, 1);
     drop(blk::COAL_ORE, itm::COAL, 1, 1);
@@ -101,6 +106,7 @@ constexpr std::array<BlockDef, blk::COUNT> with_mining(std::array<BlockDef, blk:
     drop(blk::GLASS, 0, 0, 0);
     drop(blk::ICE, 0, 0, 0);
     drop(blk::GRAVE_CAIRN, 0, 0, 0);  // its stored items drop instead (block_entity_contents)
+    drop(blk::SUNROOT_CROP, 0, 0, 0);  // seeds and roots by stage instead (growth_drops)
     return d;
 }
 

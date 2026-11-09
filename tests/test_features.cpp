@@ -728,3 +728,38 @@ TEST(test_glowcap_y_boundary) {
     CHECK(at50);
     CHECK(at49);
 }
+
+// M7 Task 3: the cells a feature writes, shared by generation and sapling growth.
+TEST(test_feature_cells) {
+    auto count = [](const std::vector<FeatureCell>& v, BlockId b, bool overwrite) {
+        return static_cast<int>(std::count_if(v.begin(), v.end(), [&](const FeatureCell& c) {
+            return c.block == b && c.overwrite == overwrite;
+        }));
+    };
+    // Oak, trunk 5 at y = 64: LOG 64..68 (overwrite), then LEAVES into AIR only: two 5x5 layers
+    // without corners (21 each) at 67..68 and two 3x3 layers (9 each) at 69..70.
+    const std::vector<FeatureCell> oak = feature_cells(Feature{100, 64, -7, FeatureType::OakTree, 5});
+    CHECK(oak.size() == 65);
+    CHECK(count(oak, blk::LOG, true) == 5);
+    CHECK(count(oak, blk::LEAVES, false) == 60);
+    CHECK(oak.front().dx == 0 && oak.front().y == 64 && oak.front().dz == 0 && oak.front().block == blk::LOG);
+    CHECK(oak[4].y == 68 && oak[4].block == blk::LOG);
+    bool leaf_range = true;
+    for (std::size_t i = 5; i < oak.size(); ++i)
+        leaf_range = leaf_range && oak[i].y >= 67 && oak[i].y <= 70 && std::abs(oak[i].dx) <= 2 && std::abs(oak[i].dz) <= 2;
+    CHECK(leaf_range);
+    // Pine, trunk 6: PINE_LOG 64..69, cone at 66..70 with radius 2, 2, 1, 1, 0: 21 + 21 + 9 + 9 + 1.
+    const std::vector<FeatureCell> pine = feature_cells(Feature{0, 64, 0, FeatureType::PineTree, 6});
+    CHECK(pine.size() == 67);
+    CHECK(count(pine, blk::PINE_LOG, true) == 6);
+    CHECK(count(pine, blk::PINE_LEAVES, false) == 61);
+    CHECK(pine.back().y == 70 && pine.back().dx == 0 && pine.back().dz == 0);
+    // Cactus and plants.
+    const std::vector<FeatureCell> cactus = feature_cells(Feature{0, 70, 0, FeatureType::Cactus, 3});
+    CHECK(cactus.size() == 3 && count(cactus, blk::CACTUS, false) == 3 && cactus[2].y == 72);
+    CHECK(feature_cells(Feature{0, 70, 0, FeatureType::TallGrass, 1}).size() == 1);
+    CHECK(feature_cells(Feature{0, 70, 0, FeatureType::Flower, 1})[0].block == blk::FLOWER);
+    // A glowcap writes one cell into AIR; place_feature adds its floor rule.
+    const std::vector<FeatureCell> cap = feature_cells(Feature{0, 20, 0, FeatureType::Glowcap, 1});
+    CHECK(cap.size() == 1 && cap[0].block == blk::GLOWCAP && !cap[0].overwrite);
+}

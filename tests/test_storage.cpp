@@ -19,6 +19,7 @@
 #include <memory>
 #include <string>
 #include <thread>
+#include <utility>
 #include <variant>
 #include <vector>
 
@@ -284,7 +285,9 @@ TEST(test_region_rejects_corrupt) {
     }
     const fs::path file = dir / "r.0.0.bin";
     const std::vector<uint8_t> good = read_bytes(file);
-    CHECK(good.size() == 12 + 12 + 8 + 4 + 4);  // v3 (M6 Task 6): be_count 0, then mob_count 0
+    // v3 (M6 Task 6): be_count 0, then mob_count 0; v4 (M7 Task 2): meta len 48, then 16 sections
+    // of one (4096, 0) run (u16 run, u8 value).
+    CHECK(good.size() == 12 + 12 + 8 + 4 + 4 + 4 + 48);
     CHECK(get_u16(good, 24) == 4096);
     CHECK(get_u16(good, 26) == blk::STONE);
 
@@ -294,7 +297,7 @@ TEST(test_region_rejects_corrupt) {
     bad.push_back(good);
     bad.back()[0] = 'X', bad.back()[1] = 'X', bad.back()[2] = 'X', bad.back()[3] = 'X';
     bad.push_back(good);
-    bad.back()[4] = 4;                                          // version 4 (newer than v3)
+    bad.back()[4] = 5;                                          // version 5 (newer than v4)
     bad.push_back(good);
     bad.back()[4] = 0;                                          // version 0
     bad.push_back(good);
@@ -462,13 +465,15 @@ TEST(test_region_fuzz_no_crash) {
         // v3 (M6 Task 6): and passive creatures.
         first[4]->mobs.push_back(SavedMob{0, 5.5f, 70.f, 5.5f, 1.25f, 7.5f});
         first[4]->mobs.push_back(SavedMob{2, 8.25f, 71.f, 2.75f, -0.5f, 3.f});
+        // v4 (M7 Task 2): and block meta.
+        for (std::size_t i = 0; i < 300; ++i) first[3]->meta[i * 7] = static_cast<uint8_t>(i % 9);
         store.save_column(ColumnPos{0, 0}, first);
         store.save_column(ColumnPos{1, 0}, pattern_column(2));
         CHECK(store.flush());
     }
     const fs::path file = tmp.path() / "r.0.0.bin";
     const std::vector<uint8_t> good = read_bytes(file);
-    CHECK(get_u32(good, 4) == 3);
+    CHECK(get_u32(good, 4) == 4);
     Lcg rng{12345};
     int loaded = 0, rejected = 0;
     bool ids_ok = true;
@@ -676,7 +681,7 @@ TEST(test_region_v2_roundtrip_block_entities) {
         CHECK(store.flush());
     }
     const std::vector<uint8_t> bytes = read_bytes(tmp.path() / "r.-1.-1.bin");
-    CHECK(get_u32(bytes, 4) == 3);  // written as version 3 (M6 Task 6)
+    CHECK(get_u32(bytes, 4) == 4);  // written as version 4 (M7 Task 2)
     RegionStore store(tmp.path());
     const std::optional<Column> col = store.load_column(ColumnPos{-1, -2});
     CHECK(col.has_value());
@@ -745,10 +750,10 @@ TEST(test_region_loads_v1) {
     RegionStore v0_store(tmp.path() / "v0");  // creates the folder
     write_bytes(tmp.path() / "v0" / "r.0.0.bin", v0);
     CHECK(!v0_store.load_column(ColumnPos{0, 0}).has_value());
-    // Saving another column rewrites the v1 region as v3 and keeps the old column.
+    // Saving another column rewrites the v1 region as v4 and keeps the old column.
     store.save_column(ColumnPos{1, 1}, pattern_column(3));
     CHECK(store.flush());
-    CHECK(get_u32(read_bytes(tmp.path() / "r.0.0.bin"), 4) == 3);
+    CHECK(get_u32(read_bytes(tmp.path() / "r.0.0.bin"), 4) == 4);
     RegionStore again(tmp.path());
     const std::optional<Column> a2 = again.load_column(ColumnPos{0, 0});
     CHECK(a2 && (*a2)[0]->blocks[0] == blk::STONE);
@@ -768,10 +773,10 @@ TEST(test_region_v2_rejects_corrupt) {
     const fs::path file = tmp.path() / "r.0.0.bin";
     const std::vector<uint8_t> good = read_bytes(file);
     // header 12, entry head 12, RLE 8, be_count at 32, entity at 36: x y z (12), kind (1), payload,
-    // then (v3) mob_count 0.
+    // then (v3) mob_count 0, then (v4) the 52-byte meta section.
     CHECK(get_u32(good, 32) == 1);
     CHECK(good[48] == 2);  // kind 2 = cairn
-    CHECK(good.size() == 36 + 13 + 4 + 5 + 4);
+    CHECK(good.size() == 36 + 13 + 4 + 5 + 4 + 52);
     auto set_u32 = [](std::vector<uint8_t>& b, std::size_t at, uint32_t v) {
         for (int k = 0; k < 4; ++k) b[at + static_cast<std::size_t>(k)] = static_cast<uint8_t>((v >> (8 * k)) & 0xFF);
     };
@@ -797,7 +802,7 @@ TEST(test_region_v2_rejects_corrupt) {
     bad.push_back(good);
     put_u16(bad.back(), 56, 3);               // damage on an item that has no durability
     bad.push_back(good);
-    bad.back().resize(good.size() - 5);       // truncated inside the entity
+    bad.back().resize(57);                    // truncated inside the entity
     bad.push_back(good);
     bad.back().resize(34);                    // truncated inside be_count
     for (const auto& b : bad) {
@@ -984,7 +989,7 @@ TEST(test_region_v3_saves_passive_only) {
         store.save_column(ColumnPos{-1, 0}, col);
         CHECK(store.flush());
     }
-    CHECK(get_u32(read_bytes(tmp.path() / "r.-1.0.bin"), 4) == 3);
+    CHECK(get_u32(read_bytes(tmp.path() / "r.-1.0.bin"), 4) == 4);
     RegionStore store(tmp.path());
     const std::optional<Column> col = store.load_column(ColumnPos{-1, 0});
     CHECK(col.has_value());
@@ -1065,7 +1070,7 @@ TEST(test_region_v3_rejects_bad_mob) {
     const std::vector<uint8_t> good = read_bytes(file);
     // header 12, entry head 12, RLE 8, be_count 0 at 32, mob_count at 36, mob at 40:
     // u8 type, f32 x (41), y (45), z (49), yaw (53), health (57).
-    CHECK(good.size() == 40 + 21);
+    CHECK(good.size() == 40 + 21 + 52);  // then the v4 meta section
     CHECK(get_u32(good, 36) == 1 && good[40] == 0);
     CHECK(get_u32(good, 41) == 0x40200000u);  // 2.5f
     auto set_u32 = [](std::vector<uint8_t>& b, std::size_t at, uint32_t v) {
@@ -1093,7 +1098,7 @@ TEST(test_region_v3_rejects_bad_mob) {
     bad.push_back(good);
     set_u32(bad.back(), 36, 0xFFFFFFFFu);    // absurd mob_count
     bad.push_back(good);
-    bad.back().resize(good.size() - 1);      // truncated inside the mob
+    bad.back().resize(60);                   // truncated inside the mob
     bad.push_back(good);
     bad.back().resize(38);                   // truncated inside mob_count
     for (const auto& b : bad) {
@@ -1144,4 +1149,169 @@ TEST(test_regress_region_v3_rejects_far_mob) {
         RegionStore store(tmp.path());
         CHECK(store.load_column(ColumnPos{0, 0}).has_value());
     }
+}
+
+// ---- Region v4: block meta (M7 Task 2) ----
+
+namespace {
+
+// A region file in the M6 v3 layout, written here: one column whose RLE holds 4096 x `id` then AIR,
+// no block entities, and one Tusker; no meta section.
+std::vector<uint8_t> write_region_v3(ColumnPos c, BlockId id) {
+    std::vector<uint8_t> b = write_region_v2(c, id);
+    b[4] = 3;
+    put_u32(b, 1);  // mob_count
+    b.push_back(0);  // Tusker
+    for (float v : {static_cast<float>(c.x * CHUNK) + 2.5f, 70.f, static_cast<float>(c.z * CHUNK) + 3.5f, 0.f, 10.f})
+        put_u32(b, std::bit_cast<uint32_t>(v));
+    return b;
+}
+
+bool all_meta_zero(const Column& col) {
+    for (const auto& ch : col)
+        for (uint8_t m : ch->meta)
+            if (m != 0) return false;
+    return true;
+}
+
+}  // namespace
+
+TEST(test_region_v4_meta_roundtrip) {
+    test::TempDir tmp;
+    Column col = pattern_column(5);
+    for (std::size_t s = 0; s < col.size(); ++s)
+        for (std::size_t i = 0; i < 4096; ++i) col[s]->meta[i] = static_cast<uint8_t>((s + i / 512) % 9);
+    for (std::size_t i = 0; i < 4096; ++i) col[2]->meta[i] = static_cast<uint8_t>(i % 9);  // no two alike in a row
+    col[7]->meta.fill(8);
+    col[15]->meta[4095] = 1;  // the last cell of the column
+    {
+        RegionStore store(tmp.path());
+        store.save_column(ColumnPos{-33, 31}, col);
+        CHECK(store.flush());
+    }
+    RegionStore store(tmp.path());
+    const std::optional<Column> back = store.load_column(ColumnPos{-33, 31});
+    CHECK(back.has_value());
+    if (!back) return;
+    CHECK(same_blocks(*back, pattern_column(5)));
+    bool same = true;
+    for (std::size_t s = 0; s < col.size(); ++s) same = same && (*back)[s]->meta == col[s]->meta;
+    CHECK(same);
+    CHECK((*back)[2]->meta[4] == 4 && (*back)[7]->meta[0] == 8 && (*back)[15]->meta[4095] == 1);
+
+    // A null chunk saves as meta 0.
+    Column holes = pattern_column(1);
+    holes[3].reset();
+    holes[4]->meta[10] = 6;
+    store.save_column(ColumnPos{0, 0}, holes);
+    CHECK(store.flush());
+    RegionStore again(tmp.path());
+    const std::optional<Column> h = again.load_column(ColumnPos{0, 0});
+    CHECK(h && (*h)[3]->meta[10] == 0 && (*h)[4]->meta[10] == 6);
+}
+
+TEST(test_region_loads_v3) {
+    test::TempDir tmp;
+    write_bytes(tmp.path() / "r.-1.0.bin", write_region_v3(ColumnPos{-2, 5}, blk::GRAVEL));
+    RegionStore store(tmp.path());
+    const std::optional<Column> col = store.load_column(ColumnPos{-2, 5});
+    CHECK(col.has_value());
+    if (!col) return;
+    CHECK((*col)[0]->blocks[0] == blk::GRAVEL && (*col)[1]->blocks[0] == blk::AIR);
+    CHECK(mob_total(*col) == 1);
+    CHECK(all_meta_zero(*col));
+    // A v3 file followed by a meta section has trailing bytes: rejected.
+    std::vector<uint8_t> extra = write_region_v3(ColumnPos{-2, 5}, blk::GRAVEL);
+    put_u32(extra, 0);
+    write_bytes(tmp.path() / "r.-1.0.bin", extra);
+    RegionStore bad(tmp.path());
+    CHECK(!bad.load_column(ColumnPos{-2, 5}).has_value());
+    // v1 and v2 files load with meta 0 too.
+    write_bytes(tmp.path() / "r.0.0.bin", write_region_v1({{ColumnPos{1, 1}, blk::SAND}}));
+    write_bytes(tmp.path() / "r.0.1.bin", write_region_v2(ColumnPos{1, 33}, blk::CLAY));
+    RegionStore old(tmp.path());
+    const std::optional<Column> v1 = old.load_column(ColumnPos{1, 1});
+    const std::optional<Column> v2 = old.load_column(ColumnPos{1, 33});
+    CHECK(v1 && all_meta_zero(*v1));
+    CHECK(v2 && all_meta_zero(*v2));
+    // Rewritten as v4, the old column keeps its blocks.
+    old.save_column(ColumnPos{2, 2}, pattern_column(3));
+    CHECK(old.flush());
+    CHECK(get_u32(read_bytes(tmp.path() / "r.0.0.bin"), 4) == 4);
+    RegionStore again(tmp.path());
+    const std::optional<Column> v1b = again.load_column(ColumnPos{1, 1});
+    CHECK(v1b && (*v1b)[0]->blocks[0] == blk::SAND && all_meta_zero(*v1b));
+}
+
+TEST(test_region_v4_rejects_bad_meta) {
+    test::TempDir tmp;
+    {
+        RegionStore store(tmp.path());
+        Column col;
+        for (std::size_t i = 0; i < col.size(); ++i) col[i] = std::make_unique<Chunk>();
+        col[0]->blocks.fill(blk::STONE);  // RLE: (4096, STONE), (61440, AIR)
+        store.save_column(ColumnPos{0, 0}, col);
+        CHECK(store.flush());
+    }
+    const fs::path file = tmp.path() / "r.0.0.bin";
+    const std::vector<uint8_t> good = read_bytes(file);
+    // header 12, entry head 12, RLE 8, be_count 0 at 32, mob_count 0 at 36, meta len at 40,
+    // section k's single run at 44 + 3k: u16 run, u8 value.
+    CHECK(good.size() == 44 + 48);
+    CHECK(get_u32(good, 40) == 48);
+    CHECK(get_u16(good, 44) == 4096 && good[46] == 0);
+    auto set_u32 = [](std::vector<uint8_t>& b, std::size_t at, uint32_t v) {
+        for (int k = 0; k < 4; ++k) b[at + static_cast<std::size_t>(k)] = static_cast<uint8_t>((v >> (8 * k)) & 0xFF);
+    };
+    // Section 0 replaced by the given runs; meta len follows.
+    auto with_section0 = [&](const std::vector<std::pair<uint16_t, uint8_t>>& runs) {
+        std::vector<uint8_t> b(good.begin(), good.begin() + 44);
+        for (const auto& [run, value] : runs) {
+            b.push_back(static_cast<uint8_t>(run & 0xFF));
+            b.push_back(static_cast<uint8_t>(run >> 8));
+            b.push_back(value);
+        }
+        b.insert(b.end(), good.begin() + 47, good.end());
+        set_u32(b, 40, static_cast<uint32_t>(b.size() - 44));
+        return b;
+    };
+
+    std::vector<std::vector<uint8_t>> bad;
+    bad.push_back(good);
+    put_u16(bad.back(), 44, 4095);              // section 0 one cell short
+    bad.push_back(good);
+    put_u16(bad.back(), 44, 4097);              // one cell over
+    bad.push_back(good);
+    put_u16(bad.back(), 44, 0);                 // run 0
+    bad.push_back(with_section0({{8192, 0}}));  // a run across two sections, one section fewer
+    bad.back().resize(bad.back().size() - 3);
+    set_u32(bad.back(), 40, static_cast<uint32_t>(bad.back().size() - 44));
+    bad.push_back(with_section0({{2000, 1}, {2000, 0}}));  // 4000 cells
+    bad.push_back(good);
+    set_u32(bad.back(), 40, 49);                // len over the remaining bytes
+    bad.push_back(good);
+    set_u32(bad.back(), 40, 45);                // len stops a section early
+    bad.push_back(good);
+    set_u32(bad.back(), 40, 0xFFFFFFFFu);       // absurd len
+    bad.push_back(good);
+    bad.back().push_back(0);                    // a byte after the last section
+    set_u32(bad.back(), 40, 49);
+    bad.push_back(good);
+    bad.back().resize(good.size() - 2);         // truncated inside the last run
+    bad.push_back(good);
+    bad.back().resize(42);                      // truncated inside len
+    for (const auto& b : bad) {
+        write_bytes(file, b);
+        RegionStore store(tmp.path());
+        CHECK(!store.load_column(ColumnPos{0, 0}).has_value());
+    }
+    // Two runs that cover section 0 exactly are fine.
+    write_bytes(file, with_section0({{2000, 3}, {2096, 0}}));
+    RegionStore split(tmp.path());
+    const std::optional<Column> col = split.load_column(ColumnPos{0, 0});
+    CHECK(col.has_value());
+    CHECK(col && (*col)[0]->meta[1999] == 3 && (*col)[0]->meta[2000] == 0 && (*col)[1]->meta[0] == 0);
+    write_bytes(file, good);
+    RegionStore store(tmp.path());
+    CHECK(store.load_column(ColumnPos{0, 0}).has_value());
 }

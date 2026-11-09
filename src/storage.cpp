@@ -24,7 +24,7 @@ namespace fs = std::filesystem;
 namespace {
 
 constexpr std::array<uint8_t, 4> MAGIC = {'N', 'M', 'C', 'R'};
-constexpr uint32_t REGION_VERSION = 3;  // written; every version from 1 up to it loads
+constexpr uint32_t REGION_VERSION = 4;  // written; every version from 1 up to it loads
 constexpr int REGION_COLUMNS = 32;  // a region is 32 x 32 columns
 constexpr std::size_t CHUNK_BLOCKS = CHUNK * CHUNK * CHUNK;
 constexpr std::size_t COLUMN_BLOCKS = SECTIONS * CHUNK_BLOCKS;
@@ -291,6 +291,50 @@ bool decode_mobs(Reader& r, ColumnPos c, Column* col) {
     return true;
 }
 
+// ---- Block meta (v4) ----
+// Section: u32 len, then len bytes of RLE pairs (u16 run, u8 value), each chunk covered exactly.
+
+std::vector<uint8_t> encode_meta(const Column& col) {
+    constexpr std::size_t LEN_BYTES = 4;
+    std::vector<uint8_t> out;
+    put_u32(out, 0);  // len, patched below
+    for (const auto& ch : col) {
+        std::array<uint8_t, CHUNK_BLOCKS> zeros{};
+        const std::array<uint8_t, CHUNK_BLOCKS>& m = ch ? ch->meta : zeros;
+        std::size_t i = 0;
+        while (i < CHUNK_BLOCKS) {
+            std::size_t j = i + 1;
+            while (j < CHUNK_BLOCKS && m[j] == m[i]) ++j;
+            put_u16(out, static_cast<uint32_t>(j - i));
+            out.push_back(m[i]);
+            i = j;
+        }
+    }
+    const auto len = static_cast<uint32_t>(out.size() - LEN_BYTES);
+    for (std::size_t k = 0; k < LEN_BYTES; ++k) out[k] = static_cast<uint8_t>((len >> (8 * k)) & 0xFF);
+    return out;
+}
+
+// Reads a whole meta section into col (chunks already allocated, or nullptr to validate).
+bool decode_meta(Reader& r, Column* col) {
+    uint32_t len = 0;
+    std::vector<uint8_t> bytes;
+    if (!r.u32(len) || !r.take(len, bytes)) return false;
+    Reader runs(bytes);
+    for (std::size_t s = 0; s < SECTIONS; ++s) {
+        std::size_t i = 0;
+        while (i < CHUNK_BLOCKS) {
+            uint32_t run = 0, value = 0;
+            if (!runs.u16(run) || !runs.u8(value)) return false;
+            if (run == 0 || run > CHUNK_BLOCKS - i) return false;
+            if (col != nullptr)
+                std::fill_n((*col)[s]->meta.begin() + static_cast<std::ptrdiff_t>(i), run, static_cast<uint8_t>(value));
+            i += run;
+        }
+    }
+    return runs.done();
+}
+
 std::optional<Column> decode_column(const RegionColumn& d, ColumnPos c) {
     std::optional<Column> col = decode(d.blocks);
     if (!col) return std::nullopt;
@@ -298,6 +342,8 @@ std::optional<Column> decode_column(const RegionColumn& d, ColumnPos c) {
     if (!decode_entities(r, c, &*col) || !r.done()) return std::nullopt;
     Reader m(d.mobs);
     if (!decode_mobs(m, c, &*col) || !m.done()) return std::nullopt;
+    Reader mt(d.meta);
+    if (!decode_meta(mt, &*col) || !mt.done()) return std::nullopt;
     return col;
 }
 
@@ -305,7 +351,8 @@ using ColumnMap = std::map<std::pair<int, int>, RegionColumn>;
 
 // The whole file must be well formed, or the region counts as corrupt. Version 1 files have no
 // entity sections; they load as columns without block entities. Versions 1 and 2 have no creature
-// sections; they load as columns without creatures.
+// sections; they load as columns without creatures. Versions 1 to 3 have no meta sections; they
+// load with every meta 0.
 std::optional<ColumnMap> parse_region(const std::vector<uint8_t>& bytes, std::pair<int, int> region) {
     Reader r(bytes);
     std::vector<uint8_t> magic;
@@ -336,6 +383,13 @@ std::optional<ColumnMap> parse_region(const std::vector<uint8_t>& bytes, std::pa
             if (!r.take(r.left() - probe.left(), data.mobs)) return std::nullopt;
         } else {
             put_u32(data.mobs, 0);
+        }
+        if (version >= 4) {
+            Reader probe = r;
+            if (!decode_meta(probe, nullptr)) return std::nullopt;
+            if (!r.take(r.left() - probe.left(), data.meta)) return std::nullopt;
+        } else {
+            data.meta = encode_meta(Column{});  // every cell 0
         }
         if (!decode_column(data, ColumnPos{cx, cz})) return std::nullopt;  // also catches duplicate cells
         if (!columns.emplace(std::make_pair(cx, cz), std::move(data)).second) return std::nullopt;
@@ -484,7 +538,7 @@ std::optional<Column> RegionStore::load_column(ColumnPos c) {
 }
 
 void RegionStore::save_column(ColumnPos c, const Column& col) {
-    RegionColumn bytes{encode(col), encode_entities(col, c), encode_mobs(col, c)};
+    RegionColumn bytes{encode(col), encode_entities(col, c), encode_mobs(col, c), encode_meta(col)};
     std::lock_guard<std::mutex> lock(mutex_);
     Region& reg = region_locked(Key{floor_div(c.x, REGION_COLUMNS), floor_div(c.z, REGION_COLUMNS)});
     reg.columns.insert_or_assign(Key{c.x, c.z}, std::move(bytes));
@@ -506,6 +560,7 @@ bool RegionStore::flush() {
             out.insert(out.end(), data.blocks.begin(), data.blocks.end());
             out.insert(out.end(), data.entities.begin(), data.entities.end());
             out.insert(out.end(), data.mobs.begin(), data.mobs.end());
+            out.insert(out.end(), data.meta.begin(), data.meta.end());
         }
         if (write_file_atomic(region_path(key), out)) {
             reg.dirty = false;

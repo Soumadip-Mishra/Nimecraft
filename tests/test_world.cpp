@@ -7,6 +7,7 @@
 
 #include <algorithm>
 #include <cstddef>
+#include <cstdint>
 #include <initializer_list>
 #include <memory>
 #include <utility>
@@ -403,4 +404,69 @@ TEST(test_world_take_arrived_mobs) {
     CHECK(w.take_arrived_mobs().empty());  // taken once
     w.insert_column(ColumnPos{0, 0}, air_column(ColumnPos{0, 0}));
     CHECK(w.take_arrived_mobs().empty());
+}
+
+// ---- Block meta (M7 Task 2) ----
+
+TEST(test_world_meta_set_get) {
+    World w(1);
+    w.insert_column(ColumnPos{-1, 0}, air_column(ColumnPos{-1, 0}));
+    w.take_dirty();
+    CHECK(w.meta(-1, 70, 3) == 0);
+    CHECK(w.set(-1, 70, 3, blk::WATER, 3));
+    CHECK(w.get(-1, 70, 3) == blk::WATER);
+    CHECK(w.meta(-1, 70, 3) == 3);
+    Chunk* c = w.chunk(ChunkPos{-1, 4, 0});
+    CHECK(c != nullptr);
+    if (c == nullptr) return;
+    CHECK(c->meta[static_cast<std::size_t>(Chunk::index(15, 6, 3))] == 3);
+
+    // Same block, new meta: an edit (version, modified, dirty) without a block change.
+    const uint32_t v = c->version;
+    c->modified = false;
+    w.take_dirty();
+    CHECK(w.set(-1, 70, 3, blk::WATER, 5));
+    CHECK(w.meta(-1, 70, 3) == 5);
+    CHECK(c->version == v + 1);
+    CHECK(c->modified);
+    // x = -1 is lx 15: the column at x = 0 also holds the cell in its mesh border, but is unloaded.
+    CHECK(same_set(w.take_dirty(), {ChunkPos{-1, 4, 0}}));
+
+    // Same block and meta: nothing changes.
+    CHECK(w.set(-1, 70, 3, blk::WATER, 5));
+    CHECK(c->version == v + 1);
+    CHECK(w.take_dirty().empty());
+
+    // A new block without a meta resets it to 0.
+    CHECK(w.set(-1, 70, 3, blk::STONE));
+    CHECK(w.meta(-1, 70, 3) == 0);
+    CHECK(w.set(-1, 70, 3, blk::WATER));
+    CHECK(w.meta(-1, 70, 3) == 0);
+}
+
+TEST(test_world_meta_unloaded_and_range) {
+    World w(1);
+    w.insert_column(ColumnPos{0, 0}, air_column(ColumnPos{0, 0}));
+    CHECK(!w.set(16, 70, 0, blk::WATER, 2));  // column (1, 0) unloaded
+    CHECK(w.meta(16, 70, 0) == 0);
+    CHECK(!w.set(0, 256, 0, blk::WATER, 2));
+    CHECK(!w.set(0, -1, 0, blk::WATER, 2));
+    CHECK(w.meta(0, 256, 0) == 0);
+    CHECK(w.meta(0, -1, 0) == 0);
+    CHECK(w.set(0, 255, 0, blk::WATER, 8));
+    CHECK(w.set(15, 0, 15, blk::WATER, 7));
+    CHECK(w.meta(0, 255, 0) == 8);
+    CHECK(w.meta(15, 0, 15) == 7);
+}
+
+TEST(test_world_take_arrived_columns) {
+    World w(1);
+    CHECK(w.take_arrived_columns().empty());
+    w.insert_column(ColumnPos{3, -4}, air_column(ColumnPos{3, -4}));
+    w.insert_column(ColumnPos{-1, 0}, air_column(ColumnPos{-1, 0}));
+    w.insert_column(ColumnPos{3, -4}, air_column(ColumnPos{3, -4}));  // replaced: arrives again
+    const std::vector<ColumnPos> v = w.take_arrived_columns();
+    CHECK(v.size() == 3);
+    CHECK(v.size() == 3 && v[0] == (ColumnPos{3, -4}) && v[1] == (ColumnPos{-1, 0}) && v[2] == (ColumnPos{3, -4}));
+    CHECK(w.take_arrived_columns().empty());
 }
