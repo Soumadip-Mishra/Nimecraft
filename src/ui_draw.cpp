@@ -153,19 +153,25 @@ Rectangle death_button_rect() {
     return Rectangle{(static_cast<float>(GetScreenWidth()) - W) / 2, static_cast<float>(GetScreenHeight()) / 2 + 10, W, H};
 }
 
-void draw_death_screen(const std::string& note, bool hovered) {
+Rectangle death_quit_rect() {
+    const Rectangle r = death_button_rect();
+    return Rectangle{r.x, r.y + r.height + 12, r.width, r.height};
+}
+
+void draw_death_screen(const std::string& note) {
     DrawRectangle(0, 0, GetScreenWidth(), GetScreenHeight(), Color{90, 0, 0, 150});
     const char* title = "You died";
     DrawText(title, (GetScreenWidth() - MeasureText(title, 48)) / 2, GetScreenHeight() / 2 - 80, 48, WHITE);
     if (!note.empty())
         DrawText(note.c_str(), (GetScreenWidth() - MeasureText(note.c_str(), 18)) / 2, GetScreenHeight() / 2 - 26, 18,
                  LIGHTGRAY);
-    const Rectangle b = death_button_rect();
-    DrawRectangleRec(b, hovered ? Color{110, 110, 130, 240} : Color{60, 60, 74, 240});
-    DrawRectangleLinesEx(b, 2.f, WHITE);
-    const char* label = "Respawn";
-    DrawText(label, static_cast<int>(b.x + (b.width - static_cast<float>(MeasureText(label, 24))) / 2),
-             static_cast<int>(b.y) + 10, 24, WHITE);
+    const Vector2 m = GetMousePosition();
+    for (const auto& [b, label] : {std::pair{death_button_rect(), "Respawn"}, std::pair{death_quit_rect(), "Quit to Title"}}) {
+        DrawRectangleRec(b, CheckCollisionPointRec(m, b) ? Color{110, 110, 130, 240} : Color{60, 60, 74, 240});
+        DrawRectangleLinesEx(b, 2.f, WHITE);
+        DrawText(label, static_cast<int>(b.x + (b.width - static_cast<float>(MeasureText(label, 24))) / 2),
+                 static_cast<int>(b.y) + 10, 24, WHITE);
+    }
 }
 
 void draw_toast(const std::string& text) {
@@ -175,4 +181,131 @@ void draw_toast(const std::string& text) {
     const int y = static_cast<int>(hotbar_top()) - 110;
     DrawRectangle((GetScreenWidth() - w) / 2 - 8, y - 4, w + 16, SIZE + 8, Color{0, 0, 0, 150});
     DrawText(text.c_str(), (GetScreenWidth() - w) / 2, y, SIZE, WHITE);
+}
+
+// ---- Menu widgets (M8 Task 3) ----
+
+namespace {
+
+constexpr Color WIDGET{60, 60, 72, 235}, WIDGET_HOT{90, 90, 115, 245}, WIDGET_OFF{45, 45, 50, 200},
+                WIDGET_EDGE{140, 140, 160, 255}, TRACK_FILL{110, 160, 90, 255};
+
+const void* g_drag = nullptr;  // the slider value being dragged, if any
+
+bool hovered(Rectangle r) {
+    return CheckCollisionPointRec(GetMousePosition(), r);
+}
+
+void centered_text(const char* text, Rectangle r, int size, Color c) {
+    const int w = MeasureText(text, size);
+    DrawText(text, static_cast<int>(r.x + (r.width - static_cast<float>(w)) / 2),
+             static_cast<int>(r.y + (r.height - static_cast<float>(size)) / 2), size, c);
+}
+
+}  // namespace
+
+int ui_font(int gui_scale) {
+    return static_cast<int>(20.f * gui_factor(gui_scale) + 0.5f);
+}
+
+void ui_title(const char* text, float y, int size, Color c) {
+    DrawText(text, (GetScreenWidth() - MeasureText(text, size)) / 2, static_cast<int>(y), size, c);
+}
+
+bool ui_button(Rectangle r, const char* label, int gui_scale, bool enabled) {
+    const bool over = enabled && hovered(r);
+    DrawRectangleRec(r, !enabled ? WIDGET_OFF : (over ? WIDGET_HOT : WIDGET));
+    DrawRectangleLinesEx(r, over ? 2.f : 1.f, WIDGET_EDGE);
+    centered_text(label, r, ui_font(gui_scale), enabled ? WHITE : GRAY);
+    return over && IsMouseButtonReleased(MOUSE_BUTTON_LEFT);
+}
+
+bool ui_slider(Rectangle r, const char* label, const char* shown, float& value, float lo, float hi, float step,
+               int gui_scale) {
+    const bool over = hovered(r);
+    if (over && IsMouseButtonPressed(MOUSE_BUTTON_LEFT)) g_drag = &value;
+    if (!IsMouseButtonDown(MOUSE_BUTTON_LEFT) && g_drag == &value) g_drag = nullptr;
+    const float before = value;
+    if (g_drag == &value) value = slider_value_at(GetMousePosition().x, r, lo, hi, step);
+    DrawRectangleRec(r, over || g_drag == &value ? WIDGET_HOT : WIDGET);
+    DrawRectangleRec(Rectangle{r.x, r.y, r.width * slider_fraction(value, lo, hi), r.height},
+                     Color{TRACK_FILL.r, TRACK_FILL.g, TRACK_FILL.b, 120});
+    const float knob_w = 8.f * gui_factor(gui_scale);
+    const float kx = r.x + (r.width - knob_w) * slider_fraction(value, lo, hi);
+    DrawRectangleRec(Rectangle{kx, r.y, knob_w, r.height}, WIDGET_EDGE);
+    DrawRectangleLinesEx(r, 1.f, WIDGET_EDGE);
+    const std::string text = std::string(label) + ": " + shown;
+    centered_text(text.c_str(), r, ui_font(gui_scale), WHITE);
+    return value != before;
+}
+
+bool ui_toggle(Rectangle r, const char* label, bool& value, int gui_scale) {
+    const std::string text = std::string(label) + ": " + (value ? "On" : "Off");
+    if (!ui_button(r, text.c_str(), gui_scale)) return false;
+    value = !value;
+    return true;
+}
+
+bool ui_text_field(Rectangle r, TextField& f, bool& focused, int gui_scale) {
+    if (IsMouseButtonPressed(MOUSE_BUTTON_LEFT)) focused = hovered(r);
+    bool changed = false;
+    if (focused) {
+        for (int c = GetCharPressed(); c > 0; c = GetCharPressed()) {
+            const std::string before = f.text;
+            f.insert(static_cast<char32_t>(c));
+            changed = changed || f.text != before;
+        }
+        if (IsKeyPressed(KEY_BACKSPACE) || IsKeyPressedRepeat(KEY_BACKSPACE)) {
+            const std::size_t before = f.text.size();
+            f.backspace();
+            changed = changed || f.text.size() != before;
+        }
+        if (IsKeyPressed(KEY_LEFT) || IsKeyPressedRepeat(KEY_LEFT)) f.left();
+        if (IsKeyPressed(KEY_RIGHT) || IsKeyPressedRepeat(KEY_RIGHT)) f.right();
+        if (IsKeyPressed(KEY_HOME)) f.cursor = 0;
+        if (IsKeyPressed(KEY_END)) f.cursor = f.text.size();
+    }
+    DrawRectangleRec(r, Color{20, 20, 26, 240});
+    DrawRectangleLinesEx(r, focused ? 2.f : 1.f, focused ? WHITE : WIDGET_EDGE);
+    const int size = ui_font(gui_scale);
+    const int pad = static_cast<int>(8.f * gui_factor(gui_scale));
+    const int ty = static_cast<int>(r.y + (r.height - static_cast<float>(size)) / 2);
+    DrawText(f.text.c_str(), static_cast<int>(r.x) + pad, ty, size, WHITE);
+    if (focused && static_cast<int>(GetTime() * 2.0) % 2 == 0) {  // blinking caret
+        const std::string head = f.text.substr(0, std::min(f.cursor, f.text.size()));
+        const int cx = static_cast<int>(r.x) + pad + MeasureText(head.c_str(), size) + 1;
+        DrawRectangle(cx, ty, 2, size, WHITE);
+    }
+    return changed;
+}
+
+int ui_scroll_list(Rectangle r, const std::vector<std::string>& rows, int& scroll, int selected, int gui_scale) {
+    const float row_h = 34.f * gui_factor(gui_scale);
+    const int visible = std::max(1, static_cast<int>(r.height / row_h));
+    const int count = static_cast<int>(rows.size());
+    const bool over = hovered(r);
+    if (over) {
+        const float wheel = GetMouseWheelMove();
+        if (wheel != 0.f) scroll += wheel > 0.f ? -1 : 1;
+    }
+    scroll = clamp_scroll(scroll, count, visible);
+    DrawRectangleRec(r, Color{0, 0, 0, 110});
+    DrawRectangleLinesEx(r, 1.f, WIDGET_EDGE);
+    const int size = ui_font(gui_scale);
+    const Vector2 m = GetMousePosition();
+    const int under = over ? list_row_at(m, r, row_h, scroll, count) : -1;
+    for (int i = 0; i < visible && scroll + i < count; ++i) {
+        const int at = scroll + i;
+        const Rectangle row{r.x + 2, r.y + static_cast<float>(i) * row_h + 1, r.width - 4, row_h - 2};
+        if (at == selected) DrawRectangleRec(row, Color{80, 110, 70, 220});
+        else if (at == under) DrawRectangleRec(row, UI_HOVER);
+        DrawText(rows[static_cast<std::size_t>(at)].c_str(), static_cast<int>(row.x + 8.f * gui_factor(gui_scale)),
+                 static_cast<int>(row.y + (row.height - static_cast<float>(size)) / 2), size, WHITE);
+    }
+    if (count > visible) {  // a scroll bar along the right edge
+        const float bar_h = r.height * static_cast<float>(visible) / static_cast<float>(count);
+        const float bar_y = r.y + (r.height - bar_h) * static_cast<float>(scroll) / static_cast<float>(count - visible);
+        DrawRectangleRec(Rectangle{r.x + r.width - 6, bar_y, 4, bar_h}, WIDGET_EDGE);
+    }
+    return under >= 0 && IsMouseButtonPressed(MOUSE_BUTTON_LEFT) ? under : -1;
 }

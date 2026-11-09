@@ -184,6 +184,9 @@ void schedule_column_water(const World& w, TickScheduler& t, ColumnPos c) {
     };
     for (int sy = 0; sy < SECTIONS; ++sy) {
         const Chunk* ch = w.chunk(ChunkPos{c.x, sy, c.z});
+        // The four neighbor chunks once per section, not once per border cell.
+        std::array<const Chunk*, 4> nb{};
+        for (std::size_t d = 0; d < 4; ++d) nb[d] = w.chunk(ChunkPos{c.x + DX[d], sy, c.z + DZ[d]});
         for (int ly = 0; ly < CHUNK; ++ly)
             for (int lz = 0; lz < CHUNK; ++lz)
                 for (int lx = 0; lx < CHUNK; ++lx) {
@@ -198,7 +201,7 @@ void schedule_column_water(const World& w, TickScheduler& t, ColumnPos c) {
                     for (std::size_t d = 0; d < 4; ++d) {
                         const int nlx = lx + DX[d], nlz = lz + DZ[d];
                         if (nlx >= 0 && nlx < CHUNK && nlz >= 0 && nlz < CHUNK) continue;
-                        const Chunk* n = w.chunk(ChunkPos{c.x + DX[d], sy, c.z + DZ[d]});
+                        const Chunk* n = nb[d];
                         if (n == nullptr) continue;
                         if (mine)
                             t.schedule(BlockPos{p.x + DX[d], p.y, p.z + DZ[d]}, FLUID_DELAY);

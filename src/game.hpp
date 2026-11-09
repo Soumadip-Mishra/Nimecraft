@@ -7,6 +7,7 @@
 // wires them to the window. Covered by --smoke and the Manual checks.
 #pragma once
 
+#include "audio.hpp"
 #include "chunk_manager.hpp"
 #include "cli.hpp"
 #include "combat.hpp"
@@ -17,6 +18,7 @@
 #include "player.hpp"
 #include "raycast.hpp"
 #include "render.hpp"
+#include "settings.hpp"
 #include "storage.hpp"
 #include "ticks.hpp"
 #include "ui_draw.hpp"
@@ -27,6 +29,7 @@
 
 #include <cstdint>
 #include <filesystem>
+#include <future>
 #include <memory>
 #include <optional>
 #include <string>
@@ -34,19 +37,38 @@
 
 class Game {
 public:
-    explicit Game(const CliOptions& o);  // loads world.meta and opens the window
-    ~Game();                             // closes the window if finish() was not called
+    // Loads world.meta and starts streaming; the window (and audio) must already be open (App in
+    // screens.*). o.world is the folder under saves/; o.rd the render distance; fov and mouse
+    // sensitivity come from s.
+    Game(const CliOptions& o, Audio& audio, const Settings& s);
+    ~Game();  // frees the GPU resources if finish() was not called
     Game(const Game&) = delete;
     Game& operator=(const Game&) = delete;
 
-    bool frame();  // one frame; false once the game should quit
-    bool save();   // modified columns, regions, and world.meta; false if a write failed
-    // Closes any open screen and the window, then saves (or, in --smoke, prints the timing line);
-    // the process exit code.
+    // One frame between the caller's BeginDrawing and EndDrawing: input and world updates (unless
+    // paused, which only draws the frozen world), then the world, HUD, and panels. False once
+    // --smoke has finished (or timed out waiting for the spawn column).
+    bool frame(bool paused);
+    bool save();  // modified columns, regions, and world.meta; false if a write failed
+    // Closes any open panel and frees the GPU resources, then saves (or, in --smoke, prints the
+    // timing line); the process exit code.
     int finish();
 
+    bool spawned() const { return spawned_; }
+    bool dead() const { return dead_; }
+    int smoke_frames() const { return smoke_frames_; }
+    // Esc pressed while playing (no panel open, alive): the caller shows the pause menu. Reading clears it.
+    bool take_pause_request();
+    // "Quit to Title" clicked on the death screen. Reading clears it.
+    bool take_quit_request();
+    // Paused: the cursor is free. Resumed: the cursor is captured again (the resuming click does
+    // nothing in the world).
+    void set_paused(bool paused);
+    // A changed settings screen: render distance, field of view, and mouse sensitivity.
+    void apply_settings(const Settings& s);
+
 private:
-    enum class Screen : uint8_t { None, Inventory, Kiln, Crate };
+    enum class Panel : uint8_t { None, Inventory, Kiln, Crate };
 
     // One slot on an open screen, rebuilt every frame for drawing and clicks.
     struct SlotRef {
@@ -58,6 +80,7 @@ private:
 
     void handle_input(float dt);
     void update_survival(const PlayerInput& in, Vector3 before, bool was_on_ground, float dt);
+    void note_health();
     void update_eating(float dt);
     void update_mobs(float dt, bool alive, std::optional<uint32_t> hit_mob);
     std::optional<uint32_t> attack_mob(const RayHit& block_hit);
@@ -70,14 +93,17 @@ private:
     void use_block(const RayHit& hit);
     void break_block(BlockPos p, bool survival_drops);
     void drop_stack(ItemStack s, Vector3 from);
-    void open_screen(Screen s, BlockPos at = BlockPos{0, 0, 0});
+    void open_screen(Panel s, BlockPos at = BlockPos{0, 0, 0});
     void close_screen();
     void tick_kilns(float dt);
     void update_block_ticks(float dt);
     std::vector<SlotRef> screen_slots();
     void screen_click(const std::vector<SlotRef>& slots);
     void shift_move(const SlotRef& from);
-    void draw(const RayHit& hit);
+    RayHit update(float dt);
+    void stage_save();
+    void autosave();
+    void draw(const RayHit& hit, bool paused);
     void draw_screen(const std::vector<SlotRef>& slots);
     void smoke_step(float dt);
     UiTextures textures() const;
@@ -96,6 +122,19 @@ private:
     GameMode mode_ = GameMode::Survival;
     Inventory inv_;
     ItemEntities items_;
+
+    // Sound (the App's device) and the view settings.
+    Audio& audio_;
+    float fov_ = 70.f, sensitivity_ = 1.f;
+    bool pause_request_ = false, quit_request_ = false, gpu_ready_ = false;
+
+    // Autosave every AUTOSAVE_S of play; the region files are written by a worker.
+    float autosave_clock_ = 0.f;
+    std::future<bool> autosave_;
+    Footsteps steps_;
+    float dig_clock_ = 0.f;          // seconds until the next Dig sound while mining
+    bool was_wet_ = false;           // feet in water last frame (entering plays Splash)
+    uint32_t ambient_rng_ = 0x51ED270Bu;  // creature calls
 
     // Creatures.
     MobManager mobs_;
@@ -129,8 +168,8 @@ private:
     std::string toast_;
     float toast_left_ = 0.f;
 
-    // Screens.
-    Screen screen_ = Screen::None;
+    // Panels (inventory, kiln, crate).
+    Panel screen_ = Panel::None;
     BlockPos open_pos_{0, 0, 0};
     ItemStack cursor_{};
     int scroll_ = 0;
@@ -143,7 +182,6 @@ private:
     uint32_t drop_rng_ = 1;
     DoubleTap space_tap_;
 
-    bool window_open_ = false;
     bool captured_ = false, swallow_click_ = false, spawned_ = false, debug_ = false;
     int drawn_ = 0, smoke_frames_ = 0;
     float smoke_max_frame_ = 0.f;

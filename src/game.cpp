@@ -48,6 +48,9 @@ const ColumnPos ORIGIN_COLUMN{0, 0};                        // spawn_player's co
 constexpr float SPAWN_PERIOD_S = 1.f, SPAWN_CLOCK_MAX = 2.f;  // spawn_tick once per second
 constexpr float MOB_REACH = 3.f, SLEEP_HOSTILE_RANGE = 8.f;
 constexpr float THORN_AIM_UP = 0.9f;  // thorns aim at the player's middle
+constexpr float DIG_SOUND_S = 0.25f;  // a Dig sound this often while mining
+constexpr uint32_t CALL_CHANCE = 12;  // each creature in earshot calls on 1 in 12 spawn seconds
+constexpr float AUTOSAVE_S = 120.f;    // the world saves itself this often while playing
 
 Vector3 on_top_of(BlockPos b) {
     return Vector3{static_cast<float>(b.x) + 0.5f, static_cast<float>(b.y + 1), static_cast<float>(b.z) + 0.5f};
@@ -129,9 +132,9 @@ void draw_crosshair() {
 
 void draw_debug(const Player& p, const World& w, const ChunkManager& mgr, int drawn, const WorldTime& t,
                 std::size_t items, std::size_t mobs) {
-    constexpr int LINES = 8;
+    constexpr int LINES = 9;
     char lines[LINES][96];
-    std::snprintf(lines[0], sizeof lines[0], "FPS %d", GetFPS());
+    std::snprintf(lines[0], sizeof lines[0], "Nimecraft %s   FPS %d", NIMECRAFT_VERSION, GetFPS());
     std::snprintf(lines[1], sizeof lines[1], "XYZ %.2f %.2f %.2f", static_cast<double>(p.pos.x),
                   static_cast<double>(p.pos.y), static_cast<double>(p.pos.z));
     std::snprintf(lines[2], sizeof lines[2], "Loaded columns %zu", w.loaded_columns().size());
@@ -140,6 +143,7 @@ void draw_debug(const Player& p, const World& w, const ChunkManager& mgr, int dr
     std::snprintf(lines[5], sizeof lines[5], "Time %d %s (F4 +1000)", t.day_tick(), t.is_night() ? "night" : "day");
     std::snprintf(lines[6], sizeof lines[6], "Dropped items %zu", items);
     std::snprintf(lines[7], sizeof lines[7], "Creatures %zu", mobs);
+    std::snprintf(lines[8], sizeof lines[8], "Render distance %d", mgr.render_distance());
     DrawRectangle(6, 6, 300, LINES * 20 + 8, Color{0, 0, 0, 140});
     for (int i = 0; i < LINES; ++i) DrawText(lines[i], 12, 12 + i * 20, 18, WHITE);
 }
@@ -176,7 +180,7 @@ std::string recipe_text(const Recipe& r) {
 
 }  // namespace
 
-Game::Game(const CliOptions& o)
+Game::Game(const CliOptions& o, Audio& audio, const Settings& s)
     : opts_(o),
       meta_file_(meta_path(o)),
       // --smoke plays a throwaway world: no save folder, no store, nothing written.
@@ -184,7 +188,10 @@ Game::Game(const CliOptions& o)
       meta_(o.smoke ? std::nullopt : load_meta(meta_file_)),
       world_(pick_seed(o, meta_)),
       pool_(worker_count()),
-      mgr_(world_, pool_, store_.get(), o.rd) {
+      mgr_(world_, pool_, store_.get(), o.rd),
+      audio_(audio),
+      fov_(static_cast<float>(s.fov)),
+      sensitivity_(s.sensitivity) {
     mode_ = o.creative ? GameMode::Creative : GameMode::Survival;
     if (meta_) {
         time_.ticks = meta_->time;
@@ -200,18 +207,8 @@ Game::Game(const CliOptions& o)
         dead_ = mode_ == GameMode::Survival && vitals_.health <= 0.f;  // quit on the death screen
     }
 
-    // --smoke paces itself at 60 FPS instead of vsync: a compositor throttles a vsynced window it
-    // considers hidden to about 1 frame per second, which would measure the desktop, not the game.
-    // It also keeps running if the compositor iconifies the window; raylib otherwise blocks in
-    // EndDrawing until the next window event, and the smoke run never finishes.
-    const unsigned pacing = o.smoke ? static_cast<unsigned>(FLAG_WINDOW_ALWAYS_RUN)
-                                    : static_cast<unsigned>(FLAG_VSYNC_HINT);
-    SetConfigFlags(pacing | FLAG_MSAA_4X_HINT | FLAG_WINDOW_RESIZABLE);
-    InitWindow(1280, 720, "Nimecraft");
-    window_open_ = true;
-    if (o.smoke) SetTargetFPS(60);
-    SetExitKey(KEY_NULL);
     renderer_.init();
+    gpu_ready_ = true;
 
     captured_ = !o.smoke && !dead_;
     if (captured_) DisableCursor();
@@ -225,9 +222,36 @@ Game::Game(const CliOptions& o)
 }
 
 Game::~Game() {
-    if (!window_open_) return;
-    renderer_.shutdown();
-    CloseWindow();
+    if (gpu_ready_) renderer_.shutdown();
+}
+
+bool Game::take_pause_request() {
+    return std::exchange(pause_request_, false);
+}
+
+bool Game::take_quit_request() {
+    return std::exchange(quit_request_, false);
+}
+
+void Game::set_paused(bool paused) {
+    if (opts_.smoke) return;
+    if (paused) {
+        EnableCursor();
+        captured_ = false;
+        mining_ = false;
+        mine_progress_ = 0.f;
+        return;
+    }
+    if (dead_ || screen_ != Panel::None) return;  // those keep the cursor free
+    DisableCursor();
+    captured_ = true;
+    swallow_click_ = true;
+}
+
+void Game::apply_settings(const Settings& s) {
+    fov_ = static_cast<float>(s.fov);
+    sensitivity_ = s.sensitivity;
+    if (mgr_.render_distance() != s.render_distance) mgr_.set_render_distance(s.render_distance);
 }
 
 UiTextures Game::textures() const {
@@ -240,32 +264,36 @@ void Game::handle_input(float dt) {
     hurt_flash_ = std::max(0.f, hurt_flash_ - dt);
     if (dead_ || respawning_) {  // no play input; the world keeps its time
         if (IsKeyPressed(KEY_F3)) debug_ = !debug_;
-        if (dead_ && spawned_ && IsMouseButtonPressed(MOUSE_BUTTON_LEFT) &&
-            CheckCollisionPointRec(GetMousePosition(), death_button_rect()))
-            start_respawn();
+        if (dead_ && spawned_ && IsMouseButtonPressed(MOUSE_BUTTON_LEFT)) {
+            if (CheckCollisionPointRec(GetMousePosition(), death_button_rect())) {
+                audio_.play_ui(Sfx::Click);
+                start_respawn();
+            } else if (CheckCollisionPointRec(GetMousePosition(), death_quit_rect())) {
+                audio_.play_ui(Sfx::Click);
+                quit_request_ = true;
+            }
+        }
         if (spawned_) time_.advance(dt);
         return;
     }
     if (!opts_.smoke) {
-        if (screen_ != Screen::None) {
+        if (screen_ != Panel::None) {
             if (IsKeyPressed(KEY_ESCAPE) || IsKeyPressed(KEY_E)) close_screen();
-        } else if (captured_ && IsKeyPressed(KEY_ESCAPE)) {
-            // Esc releases the cursor; the click that recaptures it does nothing else.
-            EnableCursor();
-            captured_ = false;
+        } else if (IsKeyPressed(KEY_ESCAPE)) {
+            pause_request_ = true;  // the App opens the pause menu and frees the cursor
         } else if (!captured_ && (IsMouseButtonPressed(MOUSE_BUTTON_LEFT) ||
                                   IsMouseButtonPressed(MOUSE_BUTTON_RIGHT))) {
             DisableCursor();
             captured_ = true;
             swallow_click_ = true;
         } else if (spawned_ && captured_ && IsKeyPressed(KEY_E)) {
-            open_screen(Screen::Inventory);
+            open_screen(Panel::Inventory);
         }
     }
     if (IsKeyPressed(KEY_F3)) debug_ = !debug_;
     if (IsKeyPressed(KEY_F4)) time_.ticks += DEBUG_TIME_STEP;
 
-    const bool playing = screen_ == Screen::None;
+    const bool playing = screen_ == Panel::None;
     if (playing) inv_.selected = update_hotbar(inv_.selected);
     if (playing && captured_ && spawned_ && IsKeyPressed(KEY_Q) && !inv_.held().empty()) {
         ItemStack& held = inv_.held();
@@ -277,6 +305,8 @@ void Game::handle_input(float dt) {
     if (mode_ != GameMode::Creative) player_.flying = false;
 
     PlayerInput in = read_input(captured_ && !swallow_click_ && playing);
+    in.mouse_dx *= sensitivity_;
+    in.mouse_dy *= sensitivity_;
     if (!playing) {  // keep the look and the walk still while a screen is open
         in = PlayerInput{};
     }
@@ -299,11 +329,19 @@ void Game::handle_input(float dt) {
 void Game::update_survival(const PlayerInput& in, Vector3 before, bool was_on_ground, float dt) {
     const bool survival = mode_ == GameMode::Survival;
     VitalsInput vin;
+    const bool wet = in_water(player_, world_);
     if (!player_.flying) {
         const float dx = player_.pos.x - before.x, dz = player_.pos.z - before.z;
         const float moved = std::sqrt(dx * dx + dz * dz);
         (in.sprint ? vin.sprinted_m : vin.walked_m) = moved;
+        if (!wet && steps_.step(moved, in.sprint, player_.on_ground)) {
+            const int bx = static_cast<int>(std::floor(player_.pos.x)), bz = static_cast<int>(std::floor(player_.pos.z));
+            const int by = static_cast<int>(std::floor(player_.pos.y - 0.05f));
+            if (const std::optional<Sfx> s = step_sfx(world_.get(bx, by, bz))) audio_.play(*s, player_.pos);
+        }
     }
+    if (wet && !was_wet_) audio_.play(Sfx::Splash, player_.pos);
+    was_wet_ = wet;
     vin.jumps = (in.jump && was_on_ground && !player_.on_ground && player_.vel.y > 0.f) ? 1 : 0;
     vin.blocks_mined = mined_since_tick_;
     vin.attacks = attacks_since_tick_;
@@ -313,13 +351,20 @@ void Game::update_survival(const PlayerInput& in, Vector3 before, bool was_on_gr
     vitals_tick(vitals_, vin, dt, mode_);
     damage_tick(damage_, dt);
 
-    const bool wet = in_water(player_, world_);
     const float fell = track_fall(fall_, player_.pos.y, player_.on_ground, wet || player_.flying || !survival);
     if (survival && fell > 0.f) take_damage(vitals_, damage_, fall_damage(fell, wet), armor_points(inv_));
 
-    if (vitals_.health < last_health_) hurt_flash_ = HURT_FLASH_S;
-    last_health_ = vitals_.health;
+    note_health();
     if (survival && vitals_.health <= 0.f) die();
+}
+
+// A health drop since the last call flashes the screen red and plays the hurt sound.
+void Game::note_health() {
+    if (vitals_.health < last_health_) {
+        hurt_flash_ = HURT_FLASH_S;
+        audio_.play_ui(Sfx::Hurt);
+    }
+    last_health_ = vitals_.health;
 }
 
 void Game::die() {
@@ -396,9 +441,10 @@ void Game::toast(const char* text) {
 void Game::update_eating(float dt) {
     ItemStack& held = inv_.held();
     const bool use = mode_ == GameMode::Survival && spawned_ && captured_ && !swallow_click_ &&
-                     screen_ == Screen::None && IsMouseButtonDown(MOUSE_BUTTON_RIGHT) && !held.empty();
+                     screen_ == Panel::None && IsMouseButtonDown(MOUSE_BUTTON_RIGHT) && !held.empty();
     if (!eat_tick(eating_, use, held.id, vitals_, dt)) return;
     eat(vitals_, item_def(held.id));
+    audio_.play_ui(Sfx::Eat);
     if (--held.count == 0) held = ItemStack{};
 }
 
@@ -415,6 +461,12 @@ void Game::update_mobs(float dt, bool alive, std::optional<uint32_t> hit_mob) {
     while (spawn_clock_ >= SPAWN_PERIOD_S) {
         spawn_clock_ -= SPAWN_PERIOD_S;
         spawn_tick(mobs_, world_, player_.pos, day_light, spawn_rng_, SpawnCaps{});
+        for (const Mob& m : mobs_.all()) {  // now and then a creature in earshot calls
+            ambient_rng_ ^= ambient_rng_ << 13;
+            ambient_rng_ ^= ambient_rng_ >> 17;
+            ambient_rng_ ^= ambient_rng_ << 5;
+            if (ambient_rng_ % CALL_CHANCE == 0) audio_.play(mob_call(m.type), m.pos);
+        }
     }
     despawn_tick(mobs_, player_.pos, dt);
     apply_mob_events(alive);
@@ -438,6 +490,7 @@ void Game::apply_mob_events(bool alive) {
         const Mob* m = mobs_.find(e.mob);
         if (m == nullptr) continue;
         const MobDef& d = mob_def(m->type);
+        audio_.play(e.kind == MobEvent::Shoot ? Sfx::ThornShoot : mob_call(m->type), e.from);
         if (e.kind == MobEvent::Shoot) {
             thorns_.push_back(make_thorn(e.from, Vector3{player_.pos.x, player_.pos.y + THORN_AIM_UP, player_.pos.z}, d.damage));
         } else if (hurtable && take_damage(vitals_, damage_, d.damage, armor_points(inv_))) {
@@ -451,11 +504,12 @@ void Game::apply_mob_events(bool alive) {
 std::optional<uint32_t> Game::attack_mob(const RayHit& block_hit) {
     const float max = block_hit.hit ? std::min(MOB_REACH, block_hit.distance) : MOB_REACH;
     target_mob_ = mobs_.raycast(player_eye(player_), player_look(player_), max);
-    if (!target_mob_ || !captured_ || swallow_click_ || screen_ != Screen::None) return std::nullopt;
+    if (!target_mob_ || !captured_ || swallow_click_ || screen_ != Panel::None) return std::nullopt;
     if (!IsMouseButtonPressed(MOUSE_BUTTON_LEFT)) return std::nullopt;
     const Mob* m = mobs_.find(*target_mob_);
     ItemStack& held = inv_.held();
     if (!mobs_.damage(*target_mob_, attack_damage(held, mob_def(m->type)), player_.pos)) return std::nullopt;
+    audio_.play(mob_call(m->type), m->pos);
     ++attacks_since_tick_;
     if (mode_ == GameMode::Survival) wear_tool(held);
     return target_mob_;
@@ -480,21 +534,23 @@ void Game::break_block(BlockPos p, bool survival_drops) {
          break_drops(b, world_.block_entity(p), inv_.held(), mode, drop_rng_++ * 0x9E3779B9u, world_.meta(p.x, p.y, p.z)))
         items_.spawn(center, s);
     if (world_.set(p.x, p.y, p.z, blk::AIR)) {
+        audio_.play(Sfx::Break, center);
         mgr_.flush_edits();
         schedule_around(ticks_, p, FLUID_DELAY);  // water may flow in, blocks above may fall
     }
-    if (screen_ != Screen::None && screen_ != Screen::Inventory && p == open_pos_) close_screen();
+    if (screen_ != Panel::None && screen_ != Panel::Inventory && p == open_pos_) close_screen();
     mining_ = false;
     mine_progress_ = 0.f;
 }
 
 void Game::update_mining(const RayHit& hit, float dt) {
     break_cooldown_ = std::max(0.f, break_cooldown_ - dt);
-    const bool held = spawned_ && captured_ && !swallow_click_ && screen_ == Screen::None && hit.hit &&
+    const bool held = spawned_ && captured_ && !swallow_click_ && screen_ == Panel::None && hit.hit &&
                       IsMouseButtonDown(MOUSE_BUTTON_LEFT);
     if (!held) {
         mining_ = false;
         mine_progress_ = 0.f;
+        dig_clock_ = 0.f;  // the next dig sounds at once
         return;
     }
     const BlockPos p{hit.x, hit.y, hit.z};
@@ -509,6 +565,11 @@ void Game::update_mining(const RayHit& hit, float dt) {
     }
     if (break_cooldown_ > 0.f) return;
     mine_progress_ += dt;
+    dig_clock_ -= dt;
+    if (dig_clock_ <= 0.f) {
+        dig_clock_ = DIG_SOUND_S;
+        audio_.play(Sfx::Dig, Vector3{p.x + 0.5f, p.y + 0.5f, p.z + 0.5f});
+    }
     if (mine_progress_ >= break_time(world_.get(p.x, p.y, p.z), inv_.held())) {
         break_block(p, true);
         ++mined_since_tick_;
@@ -517,7 +578,7 @@ void Game::update_mining(const RayHit& hit, float dt) {
 }
 
 void Game::use_block(const RayHit& hit) {
-    if (!spawned_ || !captured_ || swallow_click_ || screen_ != Screen::None || !hit.hit) return;
+    if (!spawned_ || !captured_ || swallow_click_ || screen_ != Panel::None || !hit.hit) return;
     if (!IsMouseButtonPressed(MOUSE_BUTTON_RIGHT)) return;
     const BlockPos target{hit.x, hit.y, hit.z};
     const BlockId b = world_.get(hit.x, hit.y, hit.z);
@@ -525,11 +586,11 @@ void Game::use_block(const RayHit& hit) {
         if (b == blk::KILN || b == blk::CRATE) {
             if (world_.block_entity(target) == nullptr)
                 world_.set_block_entity(target, b == blk::KILN ? BlockEntity{KilnState{}} : BlockEntity{CrateState{}});
-            open_screen(b == blk::KILN ? Screen::Kiln : Screen::Crate, target);
+            open_screen(b == blk::KILN ? Panel::Kiln : Panel::Crate, target);
             return;
         }
         if (b == blk::WORKBENCH) {
-            open_screen(Screen::Inventory);
+            open_screen(Panel::Inventory);
             return;
         }
         if (b == blk::BEDROLL) {  // sets the respawn point; at night, also sleeps until dawn
@@ -555,6 +616,7 @@ void Game::use_block(const RayHit& hit) {
     if (plant && !planted) return;
     const BlockId placed = plant ? *planted : held.id;
     if (!world_.set(x, y, z, placed)) return;
+    audio_.play(Sfx::Place, Vector3{x + 0.5f, y + 0.5f, z + 0.5f});
     if (placed == blk::KILN) world_.set_block_entity(BlockPos{x, y, z}, KilnState{});
     if (placed == blk::CRATE) world_.set_block_entity(BlockPos{x, y, z}, CrateState{});
     mgr_.flush_edits();
@@ -562,7 +624,7 @@ void Game::use_block(const RayHit& hit) {
     if (mode_ == GameMode::Survival && --held.count == 0) held = ItemStack{};
 }
 
-void Game::open_screen(Screen s, BlockPos at) {
+void Game::open_screen(Panel s, BlockPos at) {
     screen_ = s;
     open_pos_ = at;
     scroll_ = 0;
@@ -571,14 +633,14 @@ void Game::open_screen(Screen s, BlockPos at) {
 }
 
 void Game::close_screen() {
-    if (screen_ == Screen::None) return;
+    if (screen_ == Panel::None) return;
     // A stack still on the cursor goes back into the inventory, or drops if it does not fit.
     if (!cursor_.empty()) {
         const int left = inv_.add(cursor_);
         if (left > 0) drop_stack(ItemStack{cursor_.id, static_cast<uint8_t>(left), cursor_.damage}, player_eye(player_));
         cursor_ = ItemStack{};
     }
-    screen_ = Screen::None;
+    screen_ = Panel::None;
     if (!opts_.smoke && captured_) DisableCursor();
 }
 
@@ -605,10 +667,10 @@ void Game::update_block_ticks(float dt) {
 
 std::vector<Game::SlotRef> Game::screen_slots() {
     std::vector<SlotRef> out;
-    if (screen_ == Screen::None) return out;
+    if (screen_ == Panel::None) return out;
     const float w = static_cast<float>(GetScreenWidth()), h = static_cast<float>(GetScreenHeight());
     const float grid_w = 9 * UI_SLOT + 8 * UI_GAP;
-    const float x0 = std::floor((w - grid_w) / 2) - (screen_ == Screen::Inventory ? SIDE_W / 2 : 0.f);
+    const float x0 = std::floor((w - grid_w) / 2) - (screen_ == Panel::Inventory ? SIDE_W / 2 : 0.f);
     const float inv_y = std::floor(h / 2) + 10;
     const Vector2 main{x0, inv_y}, hotbar{x0, inv_y + 3 * (UI_SLOT + UI_GAP) + 8};
     for (int i = 0; i < 27; ++i)
@@ -618,7 +680,7 @@ std::vector<Game::SlotRef> Game::screen_slots() {
         out.push_back(SlotRef{&inv_.slots[static_cast<std::size_t>(i)], SlotKind::Any,
                               grid_slot_rect(hotbar, i, 9, UI_SLOT, UI_GAP), 1});
     const float top = inv_y - 4 * (UI_SLOT + UI_GAP) - 24;
-    if (screen_ == Screen::Inventory) {
+    if (screen_ == Panel::Inventory) {
         constexpr SlotKind ARMOR[4] = {SlotKind::Head, SlotKind::Chest, SlotKind::Legs, SlotKind::Feet};
         for (int i = 0; i < 4; ++i)
             out.push_back(SlotRef{&inv_.armor[static_cast<std::size_t>(i)], ARMOR[i],
@@ -655,11 +717,11 @@ void Game::shift_move(const SlotRef& from) {
         quick_move(s, all.subspan(9));
         return;
     }
-    if (screen_ == Screen::Crate) {
+    if (screen_ == Panel::Crate) {
         if (auto* crate = std::get_if<CrateState>(world_.block_entity(open_pos_))) quick_move(s, crate->slots);
         return;
     }
-    if (screen_ == Screen::Kiln) {
+    if (screen_ == Panel::Kiln) {
         if (auto* kiln = std::get_if<KilnState>(world_.block_entity(open_pos_))) {
             if (is_smelt_input(s.id)) quick_move(s, kiln->in);
             else if (fuel_seconds(s.id) > 0.f) quick_move(s, std::span<ItemStack>(&kiln->fuel, 1));
@@ -688,11 +750,12 @@ void Game::screen_click(const std::vector<SlotRef>& slots) {
     const bool shift = IsKeyDown(KEY_LEFT_SHIFT) || IsKeyDown(KEY_RIGHT_SHIFT);
     for (const SlotRef& s : slots) {
         if (!CheckCollisionPointRec(m, s.rect)) continue;
+        audio_.play_ui(Sfx::Click);
         if (shift && left) shift_move(s);
         else click_slot(cursor_, *s.stack, s.kind, left ? Click::Left : Click::Right);
         return;
     }
-    if (screen_ != Screen::Inventory) return;
+    if (screen_ != Panel::Inventory) return;
     // The side list: recipes (Survival) or the item palette (Creative).
     const float w = static_cast<float>(GetScreenWidth()), h = static_cast<float>(GetScreenHeight());
     const float grid_w = 9 * UI_SLOT + 8 * UI_GAP;
@@ -723,6 +786,7 @@ void Game::screen_click(const std::vector<SlotRef>& slots) {
     const int times = shift ? 64 : 1;  // shift-click crafts as many as fit, up to 64 times
     for (int i = 0; i < times && craft(inv_, *list[at]); ++i) {
     }
+    audio_.play_ui(Sfx::Click);
 }
 
 void Game::draw_screen(const std::vector<SlotRef>& slots) {
@@ -730,12 +794,12 @@ void Game::draw_screen(const std::vector<SlotRef>& slots) {
     const float w = static_cast<float>(GetScreenWidth()), h = static_cast<float>(GetScreenHeight());
     DrawRectangle(0, 0, GetScreenWidth(), GetScreenHeight(), Color{0, 0, 0, 110});
     const float grid_w = 9 * UI_SLOT + 8 * UI_GAP;
-    const float x0 = std::floor((w - grid_w) / 2) - (screen_ == Screen::Inventory ? SIDE_W / 2 : 0.f);
+    const float x0 = std::floor((w - grid_w) / 2) - (screen_ == Panel::Inventory ? SIDE_W / 2 : 0.f);
     const float inv_y = std::floor(h / 2) + 10;
     const float top = inv_y - 4 * (UI_SLOT + UI_GAP) - 24;
-    const float panel_w = grid_w + 24 + (screen_ == Screen::Inventory ? SIDE_W : 0.f);
+    const float panel_w = grid_w + 24 + (screen_ == Panel::Inventory ? SIDE_W : 0.f);
     draw_panel(Rectangle{x0 - 12, top - 12, panel_w, inv_y + 4 * (UI_SLOT + UI_GAP) + 20 - (top - 12)});
-    const char* title = screen_ == Screen::Kiln ? "Kiln" : (screen_ == Screen::Crate ? "Crate" : "Inventory");
+    const char* title = screen_ == Panel::Kiln ? "Kiln" : (screen_ == Panel::Crate ? "Crate" : "Inventory");
     draw_label(title, x0, top - 6, 20, WHITE);
 
     const Vector2 m = GetMousePosition();
@@ -745,7 +809,7 @@ void Game::draw_screen(const std::vector<SlotRef>& slots) {
         if (over) hovered = s.stack;
         draw_slot(t, *s.stack, s.rect, false, over);
     }
-    if (screen_ == Screen::Kiln)
+    if (screen_ == Panel::Kiln)
         if (const auto* kiln = std::get_if<KilnState>(world_.block_entity(open_pos_))) {
             const float kx = x0 + 2 * (UI_SLOT + UI_GAP), ky = top + 20;
             const float flame = kiln->burn_total > 0.f ? kiln->burn_left / kiln->burn_total : 0.f;
@@ -753,7 +817,7 @@ void Game::draw_screen(const std::vector<SlotRef>& slots) {
             draw_bar(Rectangle{kx + 2 * (UI_SLOT + UI_GAP) + 8, ky + UI_SLOT + UI_GAP + 15, 2 * UI_SLOT - 16, 10},
                      kiln->progress / SMELT_SECONDS, LIGHTGRAY);
         }
-    if (screen_ == Screen::Inventory) {
+    if (screen_ == Panel::Inventory) {
         draw_label(mode_ == GameMode::Creative ? "Items" : "Crafting", x0 + grid_w + 20, top - 6, 20, WHITE);
         const float side_x = x0 + grid_w + 20, side_y = inv_y - 4 * (UI_SLOT + UI_GAP) - 4;
         if (mode_ == GameMode::Creative) {
@@ -795,21 +859,20 @@ void Game::draw_screen(const std::vector<SlotRef>& slots) {
     if (!cursor_.empty()) draw_item_icon(t, cursor_, Rectangle{m.x - 16, m.y - 16, 32, 32});
 }
 
-void Game::draw(const RayHit& hit) {
+void Game::draw(const RayHit& hit, bool paused) {
     const int day_tick = time_.day_tick();
     const Color sky = sky_color(day_tick);
     const float day_light = daylight_at(day_tick);  // not `daylight`: glibc's <time.h> declares one
-    renderer_.set_fog(fog_range(opts_.rd), sky);
+    renderer_.set_fog(fog_range(mgr_.render_distance()), sky);
     renderer_.set_daylight(day_light);
     const std::vector<SlotRef> slots = screen_slots();
-    if (screen_ != Screen::None && !screen_fresh_) screen_click(slots);
+    if (screen_ != Panel::None && !screen_fresh_ && !paused) screen_click(slots);
     screen_fresh_ = false;
 
-    BeginDrawing();
     ClearBackground(sky);
     if (spawned_) {
         const Vector3 eye = player_eye(player_);
-        const Camera3D cam{eye, Vector3Add(eye, player_look(player_)), Vector3{0, 1, 0}, 70.f,
+        const Camera3D cam{eye, Vector3Add(eye, player_look(player_)), Vector3{0, 1, 0}, fov_,
                            CAMERA_PERSPECTIVE};
         const int h = std::max(1, GetScreenHeight());
         BeginMode3D(cam);
@@ -843,16 +906,15 @@ void Game::draw(const RayHit& hit) {
         if (mode_ == GameMode::Creative)
             DrawText(player_.flying ? "Creative - flying" : "Creative", GetScreenWidth() - 190, 12, 18, WHITE);
         if (toast_left_ > 0.f) draw_toast(toast_);
-        if (screen_ != Screen::None) draw_screen(slots);
+        if (screen_ != Panel::None) draw_screen(slots);
         const bool smoke_death = opts_.smoke && smoke_frames_ >= SMOKE_DEATH_FROM && smoke_frames_ < SMOKE_DEATH_TO;
         if (dead_ || smoke_death)
-            draw_death_screen(death_note_, CheckCollisionPointRec(GetMousePosition(), death_button_rect()));
+            draw_death_screen(death_note_);
         if (respawning_) draw_centered_text("Respawning...", GetScreenHeight() / 2 - 15, 30, WHITE);
         if (debug_) draw_debug(player_, world_, mgr_, drawn_, time_, items_.all().size(), mobs_.all().size());
     } else {
         draw_centered_text("Generating world...", GetScreenHeight() / 2 - 15, 30, WHITE);
     }
-    EndDrawing();
 }
 
 void Game::smoke_step(float dt) {
@@ -864,14 +926,30 @@ void Game::smoke_step(float dt) {
         smoke_anchor_ = player_.pos;
     }
     // Show the inventory screen for a moment, so its drawing runs in the smoke test too.
-    if (smoke_frames_ == SMOKE_UI_FROM) open_screen(Screen::Inventory);
+    if (smoke_frames_ == SMOKE_UI_FROM) open_screen(Panel::Inventory);
     if (smoke_frames_ == SMOKE_UI_TO) close_screen();
     ++smoke_frames_;
 }
 
-bool Game::frame() {
-    if (WindowShouldClose()) return false;
+bool Game::frame(bool paused) {
     const float dt = GetFrameTime();
+    RayHit hit{};
+    if (!paused) hit = update(dt);
+    for (const MeshResult& m : mgr_.take_meshes(MESH_UPLOADS_PER_FRAME)) renderer_.upload(m.pos, m.mesh);
+    for (ChunkPos p : mgr_.take_removed()) renderer_.remove(p);
+
+    draw(hit, paused);
+
+    if (opts_.smoke && !paused) {
+        smoke_step(dt);
+        if (smoke_frames_ == SMOKE_FRAMES) return false;
+        if (!spawned_ && GetTime() - start_ > SMOKE_SPAWN_TIMEOUT_S) return false;
+    }
+    return true;
+}
+
+// Input, streaming, and every world update of one unpaused frame; the block under the crosshair.
+RayHit Game::update(float dt) {
     handle_input(dt);
 
     mgr_.update(!spawned_ ? spawn_col_ : (respawning_ ? respawn_col_ : column_at(player_.pos)));
@@ -882,6 +960,13 @@ bool Game::frame() {
         spawned_ = true;
     }
     update_respawn();
+    if (spawned_ && std::isfinite(dt) && dt > 0.f) {
+        autosave_clock_ += dt;
+        if (autosave_clock_ >= AUTOSAVE_S) {
+            autosave_clock_ = 0.f;
+            autosave();
+        }
+    }
 
     RayHit hit{};
     if (spawned_) {
@@ -900,28 +985,46 @@ bool Game::frame() {
         update_mobs(dt, alive, hit_mob);
         tick_kilns(dt);
         update_block_ticks(dt);
-        if (screen_ == Screen::Kiln || screen_ == Screen::Crate) {
+        if (screen_ == Panel::Kiln || screen_ == Panel::Crate) {
             const Vector3 c{open_pos_.x + 0.5f, open_pos_.y + 0.5f, open_pos_.z + 0.5f};
             if (world_.block_entity(open_pos_) == nullptr || Vector3Distance(player_eye(player_), c) > SCREEN_REACH)
                 close_screen();
         }
     }
 
-    for (const MeshResult& m : mgr_.take_meshes(MESH_UPLOADS_PER_FRAME)) renderer_.upload(m.pos, m.mesh);
-    for (ChunkPos p : mgr_.take_removed()) renderer_.remove(p);
-
-    draw(hit);
-
-    if (opts_.smoke) {
-        smoke_step(dt);
-        if (smoke_frames_ == SMOKE_FRAMES) return false;
-        if (!spawned_ && GetTime() - start_ > SMOKE_SPAWN_TIMEOUT_S) return false;
-    }
-    return true;
+    audio_.set_listener(player_eye(player_), player_.yaw);
+    return hit;
 }
 
 bool Game::save() {
     if (!store_) return true;  // --smoke writes nothing
+    stage_save();
+    bool ok = true;
+    if (!store_->flush()) {  // waits for an autosave still writing
+        std::fputs("nimecraft: could not write some region files\n", stderr);
+        ok = false;
+    }
+    if (meta_ && !save_meta(meta_file_, *meta_)) {
+        std::fputs("nimecraft: could not write world.meta\n", stderr);
+        ok = false;
+    }
+    return ok;
+}
+
+// Every 120 s: the changed columns go into the store and world.meta is written on the main thread,
+// then a worker writes the region files (RegionStore::flush_async waits for the previous one).
+void Game::autosave() {
+    if (!store_) return;
+    if (autosave_.valid() && !autosave_.get())
+        std::fputs("nimecraft: autosave could not write some region files\n", stderr);
+    stage_save();
+    if (meta_ && !save_meta(meta_file_, *meta_)) std::fputs("nimecraft: autosave could not write world.meta\n", stderr);
+    autosave_ = store_->flush_async(pool_);
+}
+
+// The player state into meta_ and every changed loaded column (with its passive creatures) into
+// the store, ready for a flush.
+void Game::stage_save() {
     if (spawned_) {
         meta_ = WorldMeta{world_.seed(), player_.pos.x, player_.pos.y, player_.pos.z, player_.yaw, player_.pitch};
         meta_->time = time_.ticks;
@@ -944,24 +1047,13 @@ bool Game::save() {
                 if (Chunk* live = world_.chunk(ChunkPos{c.x, y, c.z})) live->modified = true;
         store_->save_column(c, col);
     }
-    bool ok = true;
-    if (!store_->flush()) {
-        std::fputs("nimecraft: could not write some region files\n", stderr);
-        ok = false;
-    }
-    if (meta_ && !save_meta(meta_file_, *meta_)) {
-        std::fputs("nimecraft: could not write world.meta\n", stderr);
-        ok = false;
-    }
-    return ok;
 }
 
 int Game::finish() {
     close_screen();  // a stack on the cursor goes back into the inventory before saving
-    if (window_open_) {
+    if (gpu_ready_) {
         renderer_.shutdown();
-        CloseWindow();
-        window_open_ = false;
+        gpu_ready_ = false;
     }
     if (opts_.smoke) {
         if (smoke_frames_ < SMOKE_FRAMES) {

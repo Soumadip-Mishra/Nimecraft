@@ -6,8 +6,11 @@
 
 #include "raylib.h"  // Vector2, Rectangle only
 
+#include <cstddef>
 #include <cstdint>
 #include <span>
+#include <string>
+#include <string_view>
 #include <vector>
 
 enum class Click : uint8_t { Left, Right, ShiftLeft };
@@ -55,3 +58,58 @@ Rectangle grid_slot_rect(Vector2 origin, int index, int cols, float size, float 
 // The first visible row of a list of `rows` rows showing `visible` at once, clamped to
 // [0, max(0, rows - visible)].
 int clamp_scroll(int scroll, int rows, int visible);
+
+// ---- Menu widgets (M8 Task 3) ----
+
+// Code points in UTF-8 text: every byte that is not a continuation byte (10xxxxxx) starts one.
+std::size_t utf8_length(std::string_view s);
+
+// A one-line UTF-8 text box. `cursor` is a byte offset that always sits on a character boundary;
+// max_len counts characters, not bytes. insert() refuses control characters (below 0x20 and 0x7F),
+// surrogates, code points above 0x10FFFF, and any character once the text holds max_len; left and
+// right move one whole character and stop at the ends; backspace removes the whole character
+// before the cursor (nothing at 0).
+struct TextField {
+    std::string text;
+    std::size_t cursor = 0;
+    std::size_t max_len = 32;
+    void insert(char32_t c);
+    void backspace();
+    void left();
+    void right();
+};
+
+// Widget size multiplier for settings.gui_scale 1..4: 0.75, 1, 1.25, 1.5 (out of range clamped).
+float gui_factor(int gui_scale);
+
+// Slider math. The value under mouse x on a horizontal track: lo at the left edge, hi at the right,
+// clamped, and snapped to the nearest multiple of `step` above lo when step > 0. A track with no
+// width or a non-finite x gives lo. slider_fraction is the knob position 0..1 of v (clamped; 0 when
+// hi <= lo).
+float slider_value_at(float x, Rectangle track, float lo, float hi, float step);
+float slider_fraction(float v, float lo, float hi);
+
+// The row of a scroll list under p: `area` shows rows of row_h px starting with row `scroll`;
+// the index into the full list, or -1 outside the area, past the last of `count` rows, or for a
+// row_h <= 0.
+int list_row_at(Vector2 p, Rectangle area, float row_h, int scroll, int count);
+
+// ---- Menu flow (M8 Task 4) ----
+// Title (Play, Settings, Quit) -> WorldList (Play, Create, Delete, Back) -> CreateWorld (Create,
+// Back) -> Loading (Loaded; Back when the world fails to open) -> Playing (Pause, Died);
+// ConfirmDelete (Confirm, Back) returns to WorldList; Paused (Resume, Back, Settings, Save and
+// Quit to Title); Settings (Back to the screen that opened it: Title or Paused); Death (Respawn,
+// Save and Quit to Title). Quit on the Title sets `quit` and keeps the screen.
+
+enum class Screen : uint8_t { Title, WorldList, CreateWorld, ConfirmDelete, Loading, Playing, Paused, Settings, Death };
+enum class MenuAction : uint8_t {
+    Play, Create, Delete, Confirm, Back, OpenSettings, Quit, Loaded, Pause, Resume, SaveAndQuit, Died, Respawn
+};
+
+struct MenuState {
+    Screen screen = Screen::Title;
+    Screen settings_return = Screen::Title;  // where Settings goes back to
+    bool quit = false;
+    // Applies an action the current screen offers; false, and nothing changes, for any other.
+    bool apply(MenuAction a);
+};

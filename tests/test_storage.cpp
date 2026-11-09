@@ -5,18 +5,23 @@
 #include "coords.hpp"
 #include "inventory.hpp"
 #include "items.hpp"
+#include "jobs.hpp"
 #include "player.hpp"
 #include "storage.hpp"
 #include "test.hpp"
 
+#include <atomic>
 #include <bit>
+#include <chrono>
 #include <cmath>
 #include <cstddef>
 #include <cstdint>
 #include <filesystem>
 #include <fstream>
+#include <future>
 #include <iterator>
 #include <memory>
+#include <optional>
 #include <string>
 #include <thread>
 #include <utility>
@@ -1314,4 +1319,200 @@ TEST(test_region_v4_rejects_bad_meta) {
     write_bytes(file, good);
     RegionStore store(tmp.path());
     CHECK(store.load_column(ColumnPos{0, 0}).has_value());
+}
+
+// Found by test_settings_missing_file_defaults (M8 Task 3): opening a folder as a file succeeds on
+// Linux and reading it threw std::ios_base::failure out of read_file, so load_meta and the region
+// loader crashed on a folder named world.meta or r.0.0.bin instead of treating it as missing.
+TEST(test_regress_read_file_on_folder) {
+    test::TempDir tmp;
+    std::filesystem::create_directories(tmp.path() / "world.meta");
+    std::filesystem::create_directories(tmp.path() / "region" / "r.0.0.bin");
+    bool threw = false;
+    try {
+        CHECK(!read_file(tmp.path() / "world.meta"));
+        CHECK(!load_meta(tmp.path() / "world.meta"));
+        RegionStore store(tmp.path() / "region");
+        CHECK(!store.load_column(ColumnPos{0, 0}));
+    } catch (...) {
+        threw = true;
+    }
+    CHECK(!threw);
+    CHECK(!read_file(tmp.path() / "missing.bin"));
+    // A regular file still reads byte for byte.
+    {
+        std::ofstream out(tmp.path() / "data.bin", std::ios::binary);
+        out.write("a\0b", 3);
+    }
+    const auto bytes = read_file(tmp.path() / "data.bin");
+    CHECK(bytes && bytes->size() == 3 && (*bytes)[1] == 0 && (*bytes)[2] == 'b');
+}
+
+// ---- M8 Task 5: background autosave (RegionStore::flush_async) ----
+
+namespace {
+
+// A column whose chunk 4 holds `id` at its first cell, marked modified.
+Column marked_column(BlockId id) {
+    Column col;
+    for (int y = 0; y < SECTIONS; ++y) col[static_cast<std::size_t>(y)] = std::make_unique<Chunk>();
+    col[4]->blocks[0] = id;
+    col[4]->modified = true;
+    return col;
+}
+
+BlockId first_block_on_disk(const std::filesystem::path& dir, ColumnPos c) {
+    RegionStore fresh(dir);  // reads the files only
+    const std::optional<Column> col = fresh.load_column(c);
+    return col && (*col)[4] ? (*col)[4]->blocks[0] : blk::AIR;
+}
+
+}  // namespace
+
+TEST(test_flush_async_writes_snapshot) {
+    test::TempDir tmp;
+    ThreadPool pool(2);
+    RegionStore store(tmp.path());
+    store.save_column(ColumnPos{3, -2}, marked_column(blk::STONE));
+    std::future<bool> f = store.flush_async(pool);
+    // An edit after the call is not part of this write...
+    store.save_column(ColumnPos{3, -2}, marked_column(blk::PLANKS));
+    CHECK(f.get());
+    CHECK(first_block_on_disk(tmp.path(), ColumnPos{3, -2}) == blk::STONE);
+    // ...but the store still has it (dirty again), so the next flush writes it.
+    CHECK(store.load_column(ColumnPos{3, -2}).has_value());
+    CHECK(store.flush_async(pool).get());
+    CHECK(first_block_on_disk(tmp.path(), ColumnPos{3, -2}) == blk::PLANKS);
+    // Negative region coordinates and a second region in the same write.
+    store.save_column(ColumnPos{-33, 40}, marked_column(blk::GLASS));
+    store.save_column(ColumnPos{31, 31}, marked_column(blk::SAND));
+    CHECK(store.flush_async(pool).get());
+    CHECK(std::filesystem::exists(tmp.path() / "r.-2.1.bin"));
+    CHECK(first_block_on_disk(tmp.path(), ColumnPos{-33, 40}) == blk::GLASS);
+    CHECK(first_block_on_disk(tmp.path(), ColumnPos{31, 31}) == blk::SAND);
+}
+
+TEST(test_flush_async_back_to_back) {
+    test::TempDir tmp;
+    ThreadPool pool(4);
+    RegionStore store(tmp.path());
+    store.save_column(ColumnPos{0, 0}, marked_column(blk::STONE));
+    std::future<bool> a = store.flush_async(pool);
+    store.save_column(ColumnPos{0, 0}, marked_column(blk::LOG));
+    std::future<bool> b = store.flush_async(pool);  // waits for a before it snapshots
+    CHECK(a.wait_for(std::chrono::seconds(0)) == std::future_status::ready);
+    CHECK(a.get());
+    CHECK(b.get());
+    CHECK(first_block_on_disk(tmp.path(), ColumnPos{0, 0}) == blk::LOG);
+    CHECK(!std::filesystem::exists(tmp.path() / "r.0.0.bin.tmp"));
+    // A synchronous flush also waits for a write in flight.
+    store.save_column(ColumnPos{0, 0}, marked_column(blk::CLAY));
+    std::future<bool> c = store.flush_async(pool);
+    store.save_column(ColumnPos{0, 0}, marked_column(blk::SNOW));
+    CHECK(store.flush());
+    CHECK(c.wait_for(std::chrono::seconds(0)) == std::future_status::ready);
+    CHECK(c.get());
+    CHECK(first_block_on_disk(tmp.path(), ColumnPos{0, 0}) == blk::SNOW);
+    // Many in a row from the main thread, each with a new edit: the last edit wins.
+    std::vector<std::future<bool>> all;
+    for (int i = 0; i < 20; ++i) {
+        store.save_column(ColumnPos{1, 1}, marked_column(i % 2 == 0 ? blk::DIRT : blk::GRAVEL));
+        all.push_back(store.flush_async(pool));
+    }
+    for (std::future<bool>& f : all) CHECK(f.get());
+    CHECK(first_block_on_disk(tmp.path(), ColumnPos{1, 1}) == blk::GRAVEL);
+}
+
+TEST(test_flush_async_failure) {
+    test::TempDir tmp;
+    const std::filesystem::path dir = tmp.path() / "world";
+    ThreadPool pool(2);
+    RegionStore store(dir);
+    store.save_column(ColumnPos{5, 5}, marked_column(blk::QUARTZ));
+    std::filesystem::remove_all(dir);
+    {
+        std::ofstream blocker(dir, std::ios::binary);  // the save folder is now a regular file
+        blocker << "x";
+    }
+    CHECK(!store.flush_async(pool).get());
+    CHECK(!store.flush_async(pool).get());  // still dirty: tried again, still failing
+    // The data stayed in memory.
+    const std::optional<Column> kept = store.load_column(ColumnPos{5, 5});
+    CHECK(kept && (*kept)[4] && (*kept)[4]->blocks[0] == blk::QUARTZ);
+    std::filesystem::remove(dir);
+    std::filesystem::create_directories(dir);
+    CHECK(store.flush_async(pool).get());
+    CHECK(first_block_on_disk(dir, ColumnPos{5, 5}) == blk::QUARTZ);
+    // The synchronous flush recovers the same way.
+    store.save_column(ColumnPos{5, 5}, marked_column(blk::ICE));
+    std::filesystem::remove_all(dir);
+    { std::ofstream blocker(dir, std::ios::binary); }
+    CHECK(!store.flush_async(pool).get());
+    std::filesystem::remove(dir);
+    std::filesystem::create_directories(dir);
+    CHECK(store.flush());
+    CHECK(first_block_on_disk(dir, ColumnPos{5, 5}) == blk::ICE);
+}
+
+TEST(test_flush_async_nothing_dirty) {
+    test::TempDir tmp;
+    ThreadPool pool(1);
+    RegionStore store(tmp.path());
+    CHECK(store.flush_async(pool).get());
+    CHECK(std::filesystem::is_empty(tmp.path()));
+    // Loading a column (a read) does not make anything dirty either.
+    CHECK(!store.load_column(ColumnPos{0, 0}).has_value());
+    CHECK(store.flush_async(pool).get());
+    CHECK(std::filesystem::is_empty(tmp.path()));
+    // After a write, a second flush has nothing left to do and leaves the file untouched.
+    store.save_column(ColumnPos{0, 0}, marked_column(blk::STONE));
+    CHECK(store.flush_async(pool).get());
+    const auto t = std::filesystem::last_write_time(tmp.path() / "r.0.0.bin");
+    std::filesystem::last_write_time(tmp.path() / "r.0.0.bin", t - std::chrono::hours(1));
+    CHECK(store.flush_async(pool).get());
+    CHECK(std::filesystem::last_write_time(tmp.path() / "r.0.0.bin") == t - std::chrono::hours(1));
+}
+
+TEST(test_flush_async_store_destroyed_while_writing) {
+    // Destroying the store waits for its write in flight, so the file is complete afterwards.
+    test::TempDir tmp;
+    ThreadPool pool(2);
+    std::future<bool> f;
+    {
+        RegionStore store(tmp.path());
+        for (int i = 0; i < 64; ++i) store.save_column(ColumnPos{i % 8, i / 8}, marked_column(blk::COAL_ORE));
+        f = store.flush_async(pool);
+    }
+    CHECK(f.get());
+    CHECK(first_block_on_disk(tmp.path(), ColumnPos{7, 7}) == blk::COAL_ORE);
+}
+
+TEST(test_flush_async_waits_for_previous_write) {
+    // The first write is held in a 1-thread pool behind a gate. A second flush_async, from another
+    // thread and another pool, must not return before the first write has finished (two writers on
+    // one region file would race on its tmp file, and the older snapshot could land last).
+    test::TempDir tmp;
+    ThreadPool held(1), free_pool(1);
+    std::promise<void> gate;
+    std::shared_future<void> open = gate.get_future().share();
+    held.submit([open] { open.wait(); });
+    RegionStore store(tmp.path());
+    store.save_column(ColumnPos{0, 0}, marked_column(blk::STONE));
+    std::future<bool> a = store.flush_async(held);  // queued behind the gate
+    store.save_column(ColumnPos{0, 0}, marked_column(blk::LOG));
+    std::atomic<bool> started{false};
+    bool first_done_when_second_returned = false;
+    std::future<bool> b;
+    std::thread second([&] {
+        started = true;
+        b = store.flush_async(free_pool);
+        first_done_when_second_returned = a.wait_for(std::chrono::seconds(0)) == std::future_status::ready;
+    });
+    while (!started) std::this_thread::yield();
+    gate.set_value();
+    second.join();
+    CHECK(first_done_when_second_returned);
+    CHECK(a.get());
+    CHECK(b.get());
+    CHECK(first_block_on_disk(tmp.path(), ColumnPos{0, 0}) == blk::LOG);
 }

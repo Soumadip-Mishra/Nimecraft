@@ -1,0 +1,9 @@
+[Desktop Entry]
+Type=Application
+Name=Nimecraft
+Comment=Survival voxel sandbox
+Exec=@EXEC@
+Icon=nimecraft
+Terminal=false
+Categories=Game;
+StartupWMClass=Nimecraft

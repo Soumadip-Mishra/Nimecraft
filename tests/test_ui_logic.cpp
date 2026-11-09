@@ -257,3 +257,291 @@ TEST(test_icon_fill) {
     CHECK(icon_fill(-1.f, 0) == IconFill::Empty);
     CHECK(icon_fill(std::numeric_limits<float>::quiet_NaN(), 0) == IconFill::Empty);
 }
+
+// ---- M8 Task 3: TextField and widget math ----
+
+TEST(test_textfield_editing) {
+    TextField f;
+    for (char32_t c : {U'a', U'c'}) f.insert(c);
+    CHECK(f.text == "ac");
+    CHECK(f.cursor == 2);
+    f.left();
+    f.insert(U'b');  // in the middle, at the cursor
+    CHECK(f.text == "abc");
+    CHECK(f.cursor == 2);
+    f.left();
+    f.left();
+    CHECK(f.cursor == 0);
+    f.left();  // at 0: nothing
+    CHECK(f.cursor == 0);
+    f.backspace();  // at 0: nothing
+    CHECK(f.text == "abc");
+    f.right();
+    f.right();
+    f.right();
+    CHECK(f.cursor == 3);
+    f.right();  // at the end: nothing
+    CHECK(f.cursor == 3);
+    f.backspace();
+    CHECK(f.text == "ab");
+    CHECK(f.cursor == 2);
+    f.left();
+    f.backspace();  // removes 'a', keeps 'b'
+    CHECK(f.text == "b");
+    CHECK(f.cursor == 0);
+    // A cursor past the end (set by hand) is pulled back before editing.
+    TextField g;
+    g.text = "xy";
+    g.cursor = 10;
+    g.insert(U'z');
+    CHECK(g.text == "xyz");
+    CHECK(g.cursor == 3);
+    // Empty field: every edit is harmless.
+    TextField e;
+    e.backspace();
+    e.left();
+    e.right();
+    CHECK(e.text.empty() && e.cursor == 0);
+}
+
+TEST(test_textfield_utf8) {
+    TextField f;
+    f.insert(U'M');
+    f.insert(U'é');  // é: 2 bytes
+    CHECK(f.text == "M\xC3\xA9");
+    CHECK(f.text.size() == 3);
+    CHECK(utf8_length(f.text) == 2);
+    CHECK(f.cursor == 3);
+    f.left();  // over the whole é
+    CHECK(f.cursor == 1);
+    f.right();
+    CHECK(f.cursor == 3);
+    f.backspace();  // the whole character
+    CHECK(f.text == "M");
+    CHECK(f.cursor == 1);
+    // 3- and 4-byte characters.
+    f.insert(U'€');      // euro sign
+    f.insert(U'\U0001F600');  // an emoji
+    CHECK(f.text == "M\xE2\x82\xAC\xF0\x9F\x98\x80");
+    CHECK(utf8_length(f.text) == 3);
+    f.left();
+    CHECK(f.cursor == 4);
+    f.left();
+    CHECK(f.cursor == 1);
+    f.right();
+    f.right();
+    CHECK(f.cursor == 8);
+    f.backspace();
+    CHECK(f.text == "M\xE2\x82\xAC");
+    f.backspace();
+    CHECK(f.text == "M");
+    // The highest valid code point and a 2-byte edge.
+    TextField h;
+    h.insert(U'\U0010FFFF');
+    h.insert(U'\u0080');
+    h.insert(U'߿');
+    h.insert(U'ࠀ');
+    CHECK(h.text == "\xF4\x8F\xBF\xBF\xC2\x80\xDF\xBF\xE0\xA0\x80");
+    CHECK(utf8_length(h.text) == 4);
+    CHECK(utf8_length("") == 0);
+}
+
+TEST(test_textfield_max_len) {
+    TextField f;
+    for (int i = 0; i < 32; ++i) f.insert(U'a');
+    CHECK(utf8_length(f.text) == 32);
+    f.insert(U'b');  // the 33rd is refused
+    CHECK(utf8_length(f.text) == 32);
+    CHECK(f.text.find('b') == std::string::npos);
+    f.backspace();
+    f.insert(U'é');  // 32 characters again, 33 bytes: still accepted
+    CHECK(utf8_length(f.text) == 32);
+    CHECK(f.text.size() == 33);
+    f.insert(U'c');
+    CHECK(utf8_length(f.text) == 32);
+    // A smaller max_len, and max_len 0 refuses everything.
+    TextField s;
+    s.max_len = 3;
+    for (char32_t c : {U'1', U'2', U'3', U'4'}) s.insert(c);
+    CHECK(s.text == "123");
+    TextField z;
+    z.max_len = 0;
+    z.insert(U'a');
+    CHECK(z.text.empty());
+    // Control characters below 0x20 are refused, 0x20 (space) is accepted.
+    TextField c;
+    for (char32_t ch = 0; ch < 0x20; ++ch) c.insert(ch);
+    CHECK(c.text.empty());
+    c.insert(U' ');
+    CHECK(c.text == " ");
+    CHECK(c.cursor == 1);
+}
+
+TEST(test_textfield_invalid_codepoints) {
+    TextField f;
+    f.insert(0x7F);          // DEL
+    f.insert(0xD800);        // surrogates
+    f.insert(0xDFFF);
+    f.insert(0x110000);      // past Unicode
+    f.insert(0xFFFFFFFFu);
+    CHECK(f.text.empty());
+    CHECK(f.cursor == 0);
+    f.insert(0xD7FF);  // just below the surrogates
+    f.insert(0xE000);  // just above
+    CHECK(utf8_length(f.text) == 2);
+}
+
+TEST(test_gui_factor) {
+    CHECK(gui_factor(1) == 0.75f);
+    CHECK(gui_factor(2) == 1.f);
+    CHECK(gui_factor(3) == 1.25f);
+    CHECK(gui_factor(4) == 1.5f);
+    CHECK(gui_factor(0) == 0.75f);
+    CHECK(gui_factor(-7) == 0.75f);
+    CHECK(gui_factor(5) == 1.5f);
+}
+
+TEST(test_slider_value_at) {
+    const Rectangle track{100, 0, 200, 20};
+    CHECK(slider_value_at(100, track, 0.f, 1.f, 0.f) == 0.f);
+    CHECK(slider_value_at(300, track, 0.f, 1.f, 0.f) == 1.f);
+    CHECK_NEAR(slider_value_at(150, track, 0.f, 1.f, 0.f), 0.25, 1e-6);
+    CHECK(slider_value_at(50, track, 0.f, 1.f, 0.f) == 0.f);   // left of the track
+    CHECK(slider_value_at(999, track, 0.f, 1.f, 0.f) == 1.f);  // right of it
+    // Integer ranges snap: render distance 4..16 step 1; 37.5% of the way is 8.5 -> 9 (nearest).
+    CHECK(slider_value_at(175, track, 4.f, 16.f, 1.f) == 9.f);
+    CHECK(slider_value_at(170, track, 4.f, 16.f, 1.f) == 8.f);   // 8.2 -> 8
+    CHECK(slider_value_at(100, track, 60.f, 100.f, 5.f) == 60.f);
+    CHECK(slider_value_at(212, track, 60.f, 100.f, 5.f) == 80.f);  // 82.4 -> 80
+    CHECK(slider_value_at(300, track, 0.1f, 3.f, 0.1f) == 3.f);    // snapping never leaves the range
+    // Degenerate input.
+    CHECK(slider_value_at(150, Rectangle{100, 0, 0, 20}, 2.f, 5.f, 0.f) == 2.f);
+    CHECK(slider_value_at(std::numeric_limits<float>::quiet_NaN(), track, 2.f, 5.f, 0.f) == 2.f);
+    // Fraction.
+    CHECK(slider_fraction(0.5f, 0.f, 1.f) == 0.5f);
+    CHECK(slider_fraction(10.f, 4.f, 16.f) == 0.5f);
+    CHECK(slider_fraction(-1.f, 0.f, 1.f) == 0.f);
+    CHECK(slider_fraction(2.f, 0.f, 1.f) == 1.f);
+    CHECK(slider_fraction(3.f, 5.f, 5.f) == 0.f);
+    CHECK(slider_fraction(std::numeric_limits<float>::quiet_NaN(), 0.f, 1.f) == 0.f);
+}
+
+TEST(test_list_row_at) {
+    const Rectangle area{10, 20, 300, 100};  // 5 rows of 20 px
+    CHECK(list_row_at(Vector2{15, 20}, area, 20.f, 0, 10) == 0);
+    CHECK(list_row_at(Vector2{15, 39.9f}, area, 20.f, 0, 10) == 0);
+    CHECK(list_row_at(Vector2{15, 40}, area, 20.f, 0, 10) == 1);
+    CHECK(list_row_at(Vector2{15, 119}, area, 20.f, 0, 10) == 4);
+    CHECK(list_row_at(Vector2{15, 45}, area, 20.f, 3, 10) == 4);  // scrolled by 3
+    CHECK(list_row_at(Vector2{15, 120}, area, 20.f, 0, 10) == -1);  // below the area
+    CHECK(list_row_at(Vector2{15, 19}, area, 20.f, 0, 10) == -1);   // above
+    CHECK(list_row_at(Vector2{9, 50}, area, 20.f, 0, 10) == -1);    // left
+    CHECK(list_row_at(Vector2{311, 50}, area, 20.f, 0, 10) == -1);  // right
+    CHECK(list_row_at(Vector2{15, 70}, area, 20.f, 0, 2) == -1);    // past the last row
+    CHECK(list_row_at(Vector2{15, 50}, area, 20.f, 0, 2) == 1);
+    CHECK(list_row_at(Vector2{15, 50}, area, 20.f, 0, 0) == -1);    // empty list
+    CHECK(list_row_at(Vector2{15, 50}, area, 0.f, 0, 10) == -1);
+    CHECK(list_row_at(Vector2{15, 50}, area, 20.f, -4, 10) == 1);   // negative scroll counts as 0
+}
+
+// ---- M8 Task 4: the menu state machine ----
+
+TEST(test_menu_transitions_allowed) {
+    struct Step {
+        Screen from;
+        MenuAction a;
+        Screen to;
+    };
+    const Step steps[] = {
+        {Screen::Title, MenuAction::Play, Screen::WorldList},
+        {Screen::WorldList, MenuAction::Back, Screen::Title},
+        {Screen::Title, MenuAction::Play, Screen::WorldList},
+        {Screen::WorldList, MenuAction::Create, Screen::CreateWorld},
+        {Screen::CreateWorld, MenuAction::Back, Screen::WorldList},
+        {Screen::WorldList, MenuAction::Delete, Screen::ConfirmDelete},
+        {Screen::ConfirmDelete, MenuAction::Back, Screen::WorldList},
+        {Screen::WorldList, MenuAction::Delete, Screen::ConfirmDelete},
+        {Screen::ConfirmDelete, MenuAction::Confirm, Screen::WorldList},
+        {Screen::WorldList, MenuAction::Create, Screen::CreateWorld},
+        {Screen::CreateWorld, MenuAction::Create, Screen::Loading},
+        {Screen::Loading, MenuAction::Back, Screen::WorldList},  // the world failed to open
+        {Screen::WorldList, MenuAction::Play, Screen::Loading},
+        {Screen::Loading, MenuAction::Loaded, Screen::Playing},
+        {Screen::Playing, MenuAction::Pause, Screen::Paused},
+        {Screen::Paused, MenuAction::Resume, Screen::Playing},
+        {Screen::Playing, MenuAction::Pause, Screen::Paused},
+        {Screen::Paused, MenuAction::Back, Screen::Playing},  // Esc again
+        {Screen::Playing, MenuAction::Pause, Screen::Paused},
+        {Screen::Paused, MenuAction::OpenSettings, Screen::Settings},
+        {Screen::Settings, MenuAction::Back, Screen::Paused},  // back where it was opened
+        {Screen::Paused, MenuAction::Resume, Screen::Playing},
+        {Screen::Playing, MenuAction::Died, Screen::Death},
+        {Screen::Death, MenuAction::Respawn, Screen::Playing},
+        {Screen::Playing, MenuAction::Died, Screen::Death},
+        {Screen::Death, MenuAction::SaveAndQuit, Screen::Title},
+        {Screen::Title, MenuAction::OpenSettings, Screen::Settings},
+        {Screen::Settings, MenuAction::Back, Screen::Title},
+        {Screen::Title, MenuAction::Play, Screen::WorldList},
+        {Screen::WorldList, MenuAction::Play, Screen::Loading},
+        {Screen::Loading, MenuAction::Loaded, Screen::Playing},
+        {Screen::Playing, MenuAction::Pause, Screen::Paused},
+        {Screen::Paused, MenuAction::SaveAndQuit, Screen::Title},
+    };
+    MenuState m;
+    CHECK(m.screen == Screen::Title);
+    CHECK(!m.quit);
+    for (const Step& s : steps) {
+        CHECK(m.screen == s.from);
+        CHECK(m.apply(s.a));
+        CHECK(m.screen == s.to);
+    }
+    CHECK(m.apply(MenuAction::Quit));  // Title: Quit ends the program, the screen stays
+    CHECK(m.quit);
+    CHECK(m.screen == Screen::Title);
+    // A world that was saved on the death screen loads straight into Death.
+    MenuState d;
+    d.screen = Screen::Loading;
+    CHECK(d.apply(MenuAction::Loaded));
+    CHECK(d.apply(MenuAction::Died));
+    CHECK(d.screen == Screen::Death);
+}
+
+TEST(test_menu_transitions_refused) {
+    // Exactly these (screen, action) pairs are offered; every other pair changes nothing.
+    const int screens = 9, actions = 13;
+    int allowed = 0;
+    for (int s = 0; s < screens; ++s)
+        for (int a = 0; a < actions; ++a) {
+            MenuState m;
+            m.screen = static_cast<Screen>(s);
+            m.settings_return = Screen::Paused;
+            const bool ok = m.apply(static_cast<MenuAction>(a));
+            if (ok) {
+                ++allowed;
+            } else {
+                CHECK(m.screen == static_cast<Screen>(s));
+                CHECK(m.settings_return == Screen::Paused);
+                CHECK(!m.quit);
+            }
+        }
+    // Title 3, WorldList 4, CreateWorld 2, ConfirmDelete 2, Loading 2, Playing 2, Paused 4,
+    // Settings 1, Death 2.
+    CHECK(allowed == 22);
+    // Some that must not happen.
+    MenuState p;
+    p.screen = Screen::Playing;
+    CHECK(!p.apply(MenuAction::Quit));        // no quitting from inside a world without saving
+    CHECK(!p.apply(MenuAction::Respawn));     // alive
+    CHECK(!p.apply(MenuAction::SaveAndQuit)); // only from the pause or death screen
+    MenuState t;
+    CHECK(!t.apply(MenuAction::Loaded));      // nothing is loading
+    CHECK(!t.apply(MenuAction::Back));        // the title has no back
+    MenuState dl;
+    dl.screen = Screen::Death;
+    CHECK(!dl.apply(MenuAction::Pause));
+    CHECK(!dl.apply(MenuAction::OpenSettings));
+    // Out-of-range actions are refused.
+    MenuState o;
+    CHECK(!o.apply(static_cast<MenuAction>(200)));
+    CHECK(o.screen == Screen::Title);
+}

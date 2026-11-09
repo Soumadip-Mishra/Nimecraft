@@ -14,6 +14,16 @@ bool mesh_result_current(const World& w, ChunkPos p, uint32_t version) {
 
 ChunkManager::ChunkManager(World& w, ThreadPool& pool, RegionStore* store, int render_distance)
     : world_(w), pool_(pool), store_(store), rd_(render_distance) {
+    set_render_distance(render_distance);
+}
+
+int ChunkManager::render_distance() const {
+    return rd_;
+}
+
+void ChunkManager::set_render_distance(int rd) {
+    rd_ = std::max(1, rd);
+    disc_.clear();
     for (int dz = -rd_; dz <= rd_; ++dz)
         for (int dx = -rd_; dx <= rd_; ++dx)
             if (dx * dx + dz * dz <= rd_ * rd_) disc_.push_back(ColumnPos{dx, dz});
@@ -86,7 +96,9 @@ void ChunkManager::settle(ColumnPos center) {
 }
 
 void ChunkManager::integrate_generation() {
-    while (auto r = gen_results_.try_pop()) {
+    for (std::size_t n = 0; n < MAX_ARRIVALS_PER_UPDATE; ++n) {
+        auto r = gen_results_.try_pop();
+        if (!r) return;
         generating_.erase(r->pos);
         if (!within(r->pos, rd_ + 2)) continue;  // the player moved away while it was generated
         world_.insert_column(r->pos, std::move(r->column));

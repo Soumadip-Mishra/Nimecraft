@@ -1,5 +1,5 @@
 cmake_minimum_required(VERSION 3.25)  # raylib 6.0's own CMakeLists requires 3.25
-project(Nimecraft C CXX)
+project(Nimecraft VERSION 1.0.0 LANGUAGES C CXX)
 
 set(CMAKE_CXX_STANDARD 20)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
@@ -79,6 +79,8 @@ list(REMOVE_ITEM NIMECRAFT_CORE_SOURCES "${PROJECT_SOURCE_DIR}/src/main.cpp")
 add_library(nimecraft_core STATIC ${NIMECRAFT_CORE_SOURCES})
 target_include_directories(nimecraft_core PUBLIC "${PROJECT_SOURCE_DIR}/src")
 target_link_libraries(nimecraft_core PUBLIC raylib PRIVATE nimecraft_options)
+# Shown on the title screen and in the F3 panel.
+target_compile_definitions(nimecraft_core PUBLIC NIMECRAFT_VERSION="${PROJECT_VERSION}")
 
 # ---- nimecraft: the game ----
 add_executable(nimecraft src/main.cpp)
@@ -96,3 +98,34 @@ endif()
 file(GLOB NIMECRAFT_TEST_SOURCES CONFIGURE_DEPENDS "${PROJECT_SOURCE_DIR}/tests/*.cpp")
 add_executable(nimecraft_tests ${NIMECRAFT_TEST_SOURCES})
 target_link_libraries(nimecraft_tests PRIVATE nimecraft_core nimecraft_options)
+
+# ---- Release packages (M8 Task 6): cmake --build <dir> --target package ----
+# Linux: Nimecraft-<version>-Linux.tar.gz; Windows (MinGW or MSVC): Nimecraft-<version>-win64.zip.
+# Each holds one top folder with the game, README.txt, and assets/ when the repository has one.
+# Our files go in the "Game" component; raylib's own install rules (library, headers) stay out.
+install(TARGETS nimecraft RUNTIME DESTINATION . COMPONENT Game)
+install(FILES packaging/README.txt DESTINATION . COMPONENT Game)
+if(NOT WIN32)
+    # M8 Task 7: the Linux app-menu install scripts and the menu entry template.
+    install(PROGRAMS packaging/install.sh packaging/uninstall.sh DESTINATION . COMPONENT Game)
+    install(FILES packaging/nimecraft.desktop.in DESTINATION . COMPONENT Game)
+endif()
+if(EXISTS "${PROJECT_SOURCE_DIR}/assets")
+    install(DIRECTORY assets DESTINATION . COMPONENT Game)
+endif()
+
+set(CPACK_PACKAGE_NAME "Nimecraft")
+set(CPACK_PACKAGE_VENDOR "Nimecraft")
+set(CPACK_PACKAGE_VERSION "${PROJECT_VERSION}")
+if(WIN32)
+    set(CPACK_GENERATOR "ZIP")
+    set(CPACK_SYSTEM_NAME "win64")
+else()
+    set(CPACK_GENERATOR "TGZ")
+    set(CPACK_SYSTEM_NAME "Linux")
+endif()
+set(CPACK_PACKAGE_FILE_NAME "Nimecraft-${PROJECT_VERSION}-${CPACK_SYSTEM_NAME}")
+set(CPACK_INCLUDE_TOPLEVEL_DIRECTORY ON)
+set(CPACK_INSTALL_CMAKE_PROJECTS "${CMAKE_BINARY_DIR};Nimecraft;Game;/")
+set(CPACK_STRIP_FILES ON)
+include(CPack)

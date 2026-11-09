@@ -22,6 +22,12 @@ Image generate_atlas();
 // are magenta. Deterministic.
 Image generate_item_atlas();
 
+// The game icon (M8 Task 7): size x size RGBA (size clamped to 16..1024), an isometric grass block
+// drawn from the generated atlas's grass top and grass side tiles with three face shades (top 1.0,
+// left 0.8, right 0.6) on a fully transparent background; every pixel is fully clear or fully
+// opaque. Deterministic. CPU only (no window needed); free it with UnloadImage.
+Image generate_icon(int size);
+
 // Chunks ordered farthest first by the distance from eye to each chunk's centre (p * 16 + 8),
 // ties broken by ChunkPos (x, then y, then z, ascending), so the order never depends on the input.
 std::vector<ChunkPos> sort_back_to_front(std::vector<ChunkPos> chunks, Vector3 eye);

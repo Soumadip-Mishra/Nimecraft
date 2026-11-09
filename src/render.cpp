@@ -605,6 +605,44 @@ Image generate_atlas() {
     return Image{px, ATLAS_PX, ATLAS_PX, 1, PIXELFORMAT_UNCOMPRESSED_R8G8B8A8};
 }
 
+Image generate_icon(int size) {
+    size = std::clamp(size, 16, 1024);
+    const Image atlas = generate_atlas();
+    const auto* src = static_cast<const unsigned char*>(atlas.data);
+    auto* px = static_cast<unsigned char*>(RL_CALLOC(static_cast<std::size_t>(size) * size * 4, 1));  // clear
+    // The cube's top-front corner sits at the center; its edges are s long on screen: the top face
+    // spans C + u * (-w, -h) + v * (w, -h), the left face C + u * (-w, -h) + t * (0, s), and the
+    // right face C + v * (w, -h) + t * (0, s), for u, v, t in [0, 1] (w = s cos 30, h = s / 2).
+    const float c = static_cast<float>(size) / 2.f;
+    const float s = static_cast<float>(size) * 0.47f, w = s * 0.8660254f, h = s / 2.f;
+    const auto sample = [&](int tile, float fu, float fv, float shade, unsigned char* out) {
+        const int tx = std::clamp(static_cast<int>(fu * TILE_PX), 0, TILE_PX - 1);
+        const int ty = std::clamp(static_cast<int>(fv * TILE_PX), 0, TILE_PX - 1);
+        const int ax = (tile % ATLAS_TILES) * TILE_PX + tx, ay = (tile / ATLAS_TILES) * TILE_PX + ty;
+        const unsigned char* p = src + (static_cast<std::size_t>(ay) * ATLAS_PX + ax) * 4;
+        for (int k = 0; k < 3; ++k) out[k] = static_cast<unsigned char>(static_cast<float>(p[k]) * shade + 0.5f);
+        out[3] = 255;
+    };
+    const auto inside = [](float a) { return a >= 0.f && a <= 1.f; };
+    for (int y = 0; y < size; ++y)
+        for (int x = 0; x < size; ++x) {
+            const float dx = static_cast<float>(x) + 0.5f - c, dy = static_cast<float>(y) + 0.5f - c;
+            unsigned char* out = px + (static_cast<std::size_t>(y) * size + x) * 4;
+            const float tu = (-dy / h - dx / w) / 2.f, tv = (-dy / h + dx / w) / 2.f;
+            if (inside(tu) && inside(tv)) {
+                sample(T_GRASS_TOP, tu, tv, 1.f, out);
+            } else if (dx <= 0.f) {
+                const float u = -dx / w, t = (dy + h * u) / s;
+                if (inside(u) && inside(t)) sample(T_GRASS_SIDE, 1.f - u, t, 0.8f, out);
+            } else {
+                const float v = dx / w, t = (dy + h * v) / s;
+                if (inside(v) && inside(t)) sample(T_GRASS_SIDE, v, t, 0.6f, out);
+            }
+        }
+    UnloadImage(atlas);
+    return Image{px, size, size, 1, PIXELFORMAT_UNCOMPRESSED_R8G8B8A8};
+}
+
 Image generate_item_atlas() {
     auto* px = static_cast<unsigned char*>(RL_MALLOC(ATLAS_PX * ATLAS_PX * 4));
     const int used = itm::END - itm::STICK;

@@ -563,3 +563,51 @@ TEST(test_manager_unload_hook) {
     CHECK(col.has_value() && (*col)[4]->mobs.size() == 1);
     CHECK(!store.load_column(ColumnPos{1, 0}).has_value());  // untouched columns stay unsaved
 }
+
+// M8 Task 4: the settings screen changes the render distance of a running game.
+TEST(test_manager_set_render_distance) {
+    World w(1);
+    ThreadPool pool(4);
+    ChunkManager m(w, pool, nullptr, 2);
+    CHECK(m.render_distance() == 2);
+    m.settle(ColumnPos{0, 0});
+    CHECK(w.loaded_columns().size() == 13);
+    m.set_render_distance(3);  // grows: the new ring loads
+    CHECK(m.render_distance() == 3);
+    m.settle(ColumnPos{0, 0});
+    CHECK(w.loaded_columns().size() == 29);
+    m.set_render_distance(4);
+    m.settle(ColumnPos{0, 0});
+    CHECK(w.loaded_columns().size() == 49);
+    // Shrinks: columns beyond the usual unload margin (rd + 2 = 3) go, the rest stay.
+    m.set_render_distance(1);
+    m.settle(ColumnPos{0, 0});
+    CHECK(w.loaded_columns().size() == 29);
+    for (ColumnPos c : w.loaded_columns()) CHECK(c.x * c.x + c.z * c.z <= 9);
+    m.take_removed();
+    // Moving on loads only the new, smaller disc around the new center.
+    m.settle(ColumnPos{20, 0});
+    CHECK(w.loaded_columns().size() == 5);
+    m.set_render_distance(0);  // below 1 counts as 1
+    CHECK(m.render_distance() == 1);
+    m.set_render_distance(-5);
+    CHECK(m.render_distance() == 1);
+}
+
+// M8 Task 5 (performance): a burst of finished columns is integrated over several frames, at most
+// MAX_ARRIVALS_PER_UPDATE per update, so one frame never inserts and light-stitches dozens at once.
+TEST(test_manager_caps_arrivals_per_update) {
+    CHECK(MAX_ARRIVALS_PER_UPDATE == 4);
+    World w(1);
+    ThreadPool pool(4);
+    ChunkManager m(w, pool, nullptr, 2);
+    m.update(ColumnPos{0, 0});  // schedules 2 * 4 = 8 generation jobs
+    pool.wait_idle();
+    m.update(ColumnPos{0, 0});
+    CHECK(w.loaded_columns().size() == 4);
+    m.update(ColumnPos{0, 0});
+    CHECK(w.loaded_columns().size() == 8);
+    m.settle(ColumnPos{0, 0});  // the rest still arrive
+    CHECK(w.loaded_columns().size() == 13);
+    CHECK(m.pending_jobs() == 0);
+}

@@ -2,9 +2,11 @@
 #include "cli.hpp"
 #include "test.hpp"
 
+#include <filesystem>
 #include <initializer_list>
 #include <optional>
 #include <span>
+#include <string>
 #include <string_view>
 #include <vector>
 
@@ -113,4 +115,46 @@ TEST(test_cli_creative_flag) {
     CHECK(both.has_value() && both->creative && both->seed == 7u);
     CHECK(!parse({"--creative", "yes"}).has_value());  // takes no value: "yes" is an unknown flag
     CHECK(std::string_view(cli_usage()).find("--creative") != std::string_view::npos);
+}
+
+// M8 Task 6: the version comes from project(Nimecraft VERSION x.y.z) in CMakeLists.txt and is shown
+// on the title screen and in the F3 panel.
+TEST(test_version_from_cmake) {
+    const std::string v = NIMECRAFT_VERSION;
+    int dots = 0;
+    bool digits_only = !v.empty() && v.front() != '.' && v.back() != '.';
+    for (char c : v) {
+        if (c == '.') ++dots;
+        else if (c < '0' || c > '9') digits_only = false;
+    }
+    CHECK(digits_only);
+    CHECK(dots == 2);
+    CHECK(v == "1.0.0");
+}
+
+// M8 Task 7: --export-icon FILE [SIZE] writes the generated icon and exits without a window.
+TEST(test_cli_export_icon) {
+    const auto parse = [](std::vector<const char*> a) {
+        return parse_cli(std::span<const char* const>(a.data(), a.size()));
+    };
+    const std::optional<CliOptions> plain = parse({"--export-icon", "icon.png"});
+    CHECK(plain.has_value());
+    if (plain) {
+        CHECK(plain->export_icon.has_value());
+        CHECK(plain->export_icon && *plain->export_icon == std::filesystem::path("icon.png"));
+        CHECK(plain->icon_size == 256);  // default size
+    }
+    const std::optional<CliOptions> sized = parse({"--export-icon", "out/big icon.png", "512"});
+    CHECK(sized && sized->icon_size == 512 && sized->export_icon &&
+          *sized->export_icon == std::filesystem::path("out/big icon.png"));
+    // A flag right after the file is a flag, not a size.
+    const std::optional<CliOptions> then_flag = parse({"--export-icon", "i.png", "--rd", "5"});
+    CHECK(then_flag && then_flag->icon_size == 256 && then_flag->rd == 5);
+    // A UTF-8 file name stays the same path.
+    const std::optional<CliOptions> utf8 = parse({"--export-icon", "ic\xC3\xB4ne.png"});
+    CHECK(utf8 && utf8->export_icon && *utf8->export_icon == std::filesystem::path(u8"icône.png"));
+    // Without the flag there is no icon to export.
+    const std::optional<CliOptions> none = parse({"--world", "w"});
+    CHECK(none && !none->export_icon && none->icon_size == 256);
+    CHECK(std::string_view(cli_usage()).find("--export-icon") != std::string_view::npos);
 }

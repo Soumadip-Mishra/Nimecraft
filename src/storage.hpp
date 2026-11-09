@@ -28,11 +28,14 @@
 
 #include <cstdint>
 #include <filesystem>
+#include <future>
 #include <map>
 #include <mutex>
 #include <optional>
 #include <utility>
 #include <vector>
+
+class ThreadPool;
 
 // Internal to RegionStore: one column's validated bytes, RLE blocks, its entity section, its
 // creature section, and its meta section.
@@ -43,11 +46,22 @@ struct RegionColumn {
 class RegionStore {
 public:
     explicit RegionStore(std::filesystem::path dir);  // creates dir
+    ~RegionStore();  // waits for a flush_async write still in flight
+    RegionStore(const RegionStore&) = delete;
+    RegionStore& operator=(const RegionStore&) = delete;
     // Thread-safe. nullopt if absent or its region file is corrupt; chunks are marked modified and
     // hold the column's block entities.
     std::optional<Column> load_column(ColumnPos c);
     void save_column(ColumnPos c, const Column& col);  // thread-safe, cached until flush
-    bool flush();  // rewrite changed regions: tmp file + rename; false if any write failed
+    // Rewrites changed regions (tmp file + rename), after waiting for a flush_async in flight; false
+    // if any write failed (those regions stay changed, so a later flush tries again).
+    bool flush();
+    // Background autosave (M8 Task 5): waits for the previous flush_async, takes a snapshot of every
+    // changed region on the calling thread (so later save_column calls are not in it), and writes it
+    // in a pool job. The future is true when every write succeeded (or nothing had changed: no file
+    // is written); on a failure the failed regions count as changed again, their data stays in
+    // memory, and a later flush or flush_async writes them.
+    std::future<bool> flush_async(ThreadPool& pool);
 
 private:
     using Key = std::pair<int, int>;                      // (x, z), ordered for stable output
@@ -58,10 +72,14 @@ private:
 
     Region& region_locked(Key r);  // loads the file on first use; mutex_ held
     std::filesystem::path region_path(Key r) const;
+    // The file bytes of every dirty region, which are then marked clean; mutex_ held.
+    std::vector<std::pair<Key, std::vector<uint8_t>>> take_dirty_locked();
+    void wait_for_writer();
 
     std::filesystem::path dir_;
     std::mutex mutex_;
     std::map<Key, Region> regions_;
+    std::shared_future<void> writing_;  // the flush_async job in flight, if any (main thread only)
 };
 
 struct WorldMeta {
@@ -85,6 +103,12 @@ struct WorldMeta {
     Vitals vitals{};
     std::optional<BlockPos> spawn{};
 };
+
+// The whole file in binary mode; nullopt when it cannot be opened or read.
+std::optional<std::vector<uint8_t>> read_file(const std::filesystem::path& p);
+// Writes "<file>.tmp" and renames it over file, so a crash never leaves a half-written file;
+// false (and no tmp file left behind) when either step fails. Never throws.
+bool write_file_atomic(const std::filesystem::path& file, const std::vector<uint8_t>& bytes);
 
 bool save_meta(const std::filesystem::path& file, const WorldMeta& m);
 std::optional<WorldMeta> load_meta(const std::filesystem::path& file);

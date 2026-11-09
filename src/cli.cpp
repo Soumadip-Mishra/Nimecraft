@@ -8,6 +8,8 @@
 
 namespace {
 
+constexpr int ICON_MIN = 16, ICON_MAX = 1024;
+
 template <class T>
 std::optional<T> parse_number(std::string_view s) {
     T v{};
@@ -45,6 +47,7 @@ bool valid_world_name(std::string_view name) {
 
 std::optional<CliOptions> parse_cli(std::span<const char* const> args) {
     CliOptions o;
+    o.skip_title = !args.empty();
     for (std::size_t i = 0; i < args.size(); ++i) {
         const std::string_view flag = args[i];
         if (flag == "--smoke" || flag == "--creative") {
@@ -60,6 +63,14 @@ std::optional<CliOptions> parse_cli(std::span<const char* const> args) {
             const auto seed = parse_number<uint32_t>(value);
             if (!seed) return std::nullopt;
             o.seed = *seed;
+        } else if (flag == "--export-icon") {
+            if (value.empty()) return std::nullopt;
+            o.export_icon = std::filesystem::path(std::u8string(value.begin(), value.end()));  // UTF-8 text
+            if (i + 1 < args.size() && !std::string_view(args[i + 1]).starts_with("--")) {
+                const auto size = parse_number<int>(args[++i]);
+                if (!size || *size < ICON_MIN || *size > ICON_MAX) return std::nullopt;
+                o.icon_size = *size;
+            }
         } else if (flag == "--rd") {
             const auto rd = parse_number<int>(value);
             if (!rd || *rd < 4 || *rd > 16) return std::nullopt;
@@ -72,10 +83,12 @@ std::optional<CliOptions> parse_cli(std::span<const char* const> args) {
 }
 
 const char* cli_usage() {
-    return "usage: nimecraft [--world NAME] [--seed N] [--rd 4..16] [--creative] [--smoke]\n"
+    return "usage: nimecraft [--world NAME] [--seed N] [--rd 4..16] [--creative] [--smoke] [--export-icon FILE [SIZE]]\n"
            "  --world NAME  world folder under saves/ (default: default)\n"
            "  --seed N      seed for a new world, 0..4294967295 (default: from the clock)\n"
            "  --rd N        render distance in columns, 4..16 (default: 8)\n"
            "  --creative    start a new world in Creative mode (fly, unlimited blocks)\n"
-           "  --smoke       walk a temporary world for 600 frames, print timing, exit\n";
+           "  --smoke       walk a temporary world for 600 frames, print timing, exit\n"
+           "  --export-icon FILE [SIZE]  write the game icon as a PNG (SIZE 16..1024, default 256), exit\n"
+           "With no options the title screen opens.\n";
 }

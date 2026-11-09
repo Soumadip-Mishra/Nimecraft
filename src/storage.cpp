@@ -3,6 +3,7 @@
 #include "block.hpp"
 #include "block_entities.hpp"
 #include "items.hpp"
+#include "jobs.hpp"
 #include "mobs.hpp"
 
 #include <algorithm>
@@ -13,6 +14,7 @@
 #include <cstddef>
 #include <fstream>
 #include <iterator>
+#include <memory>
 #include <span>
 #include <string>
 #include <string_view>
@@ -398,12 +400,21 @@ std::optional<ColumnMap> parse_region(const std::vector<uint8_t>& bytes, std::pa
     return columns;
 }
 
+}  // namespace
+
 std::optional<std::vector<uint8_t>> read_file(const fs::path& p) {
+    // A folder opens on Linux, and reading it throws from inside libstdc++: only read regular files.
+    std::error_code ec;
+    if (!fs::is_regular_file(p, ec)) return std::nullopt;
     std::ifstream in(p, std::ios::binary);
     if (!in) return std::nullopt;
-    std::vector<uint8_t> b((std::istreambuf_iterator<char>(in)), std::istreambuf_iterator<char>());
-    if (in.bad()) return std::nullopt;
-    return b;
+    try {
+        std::vector<uint8_t> b((std::istreambuf_iterator<char>(in)), std::istreambuf_iterator<char>());
+        if (in.bad()) return std::nullopt;
+        return b;
+    } catch (const std::exception&) {  // a read error mid-file
+        return std::nullopt;
+    }
 }
 
 // Writes to "<file>.tmp" and renames it over file, so a crash never leaves a half-written file.
@@ -430,6 +441,8 @@ bool write_file_atomic(const fs::path& file, const std::vector<uint8_t>& bytes) 
     }
     return true;
 }
+
+namespace {
 
 template <class T>
 std::string number_text(T v) {
@@ -545,28 +558,76 @@ void RegionStore::save_column(ColumnPos c, const Column& col) {
     reg.dirty = true;
 }
 
-bool RegionStore::flush() {
-    std::lock_guard<std::mutex> lock(mutex_);
-    bool ok = true;
+RegionStore::~RegionStore() {
+    wait_for_writer();
+}
+
+void RegionStore::wait_for_writer() {
+    if (writing_.valid()) writing_.wait();
+}
+
+std::vector<std::pair<RegionStore::Key, std::vector<uint8_t>>> RegionStore::take_dirty_locked() {
+    std::vector<std::pair<Key, std::vector<uint8_t>>> out;
     for (auto& [key, reg] : regions_) {
         if (!reg.dirty) continue;
-        std::vector<uint8_t> out(MAGIC.begin(), MAGIC.end());
-        put_u32(out, REGION_VERSION);
-        put_u32(out, static_cast<uint32_t>(reg.columns.size()));
+        std::vector<uint8_t> bytes(MAGIC.begin(), MAGIC.end());
+        put_u32(bytes, REGION_VERSION);
+        put_u32(bytes, static_cast<uint32_t>(reg.columns.size()));
         for (const auto& [pos, data] : reg.columns) {
-            put_u32(out, static_cast<uint32_t>(pos.first));
-            put_u32(out, static_cast<uint32_t>(pos.second));
-            put_u32(out, static_cast<uint32_t>(data.blocks.size()));
-            out.insert(out.end(), data.blocks.begin(), data.blocks.end());
-            out.insert(out.end(), data.entities.begin(), data.entities.end());
-            out.insert(out.end(), data.mobs.begin(), data.mobs.end());
-            out.insert(out.end(), data.meta.begin(), data.meta.end());
+            put_u32(bytes, static_cast<uint32_t>(pos.first));
+            put_u32(bytes, static_cast<uint32_t>(pos.second));
+            put_u32(bytes, static_cast<uint32_t>(data.blocks.size()));
+            bytes.insert(bytes.end(), data.blocks.begin(), data.blocks.end());
+            bytes.insert(bytes.end(), data.entities.begin(), data.entities.end());
+            bytes.insert(bytes.end(), data.mobs.begin(), data.mobs.end());
+            bytes.insert(bytes.end(), data.meta.begin(), data.meta.end());
         }
-        if (write_file_atomic(region_path(key), out)) {
-            reg.dirty = false;
-        } else {
+        reg.dirty = false;
+        out.emplace_back(key, std::move(bytes));
+    }
+    return out;
+}
+
+std::future<bool> RegionStore::flush_async(ThreadPool& pool) {
+    wait_for_writer();
+    auto result = std::make_shared<std::promise<bool>>();
+    std::future<bool> f = result->get_future();
+    std::vector<std::pair<Key, std::vector<uint8_t>>> snapshot;
+    {
+        std::lock_guard<std::mutex> lock(mutex_);
+        snapshot = take_dirty_locked();
+    }
+    if (snapshot.empty()) {
+        result->set_value(true);
+        return f;
+    }
+    auto done = std::make_shared<std::promise<void>>();
+    writing_ = done->get_future().share();
+    std::vector<fs::path> paths;
+    for (const auto& entry : snapshot) paths.push_back(region_path(entry.first));
+    auto job = std::make_shared<std::vector<std::pair<Key, std::vector<uint8_t>>>>(std::move(snapshot));
+    pool.submit([this, job, paths = std::move(paths), result, done] {
+        bool ok = true;
+        for (std::size_t i = 0; i < job->size(); ++i) {
+            if (write_file_atomic(paths[i], (*job)[i].second)) continue;
             ok = false;
+            std::lock_guard<std::mutex> lock(mutex_);
+            regions_[(*job)[i].first].dirty = true;  // keep it for the next flush
         }
+        result->set_value(ok);
+        done->set_value();
+    });
+    return f;
+}
+
+bool RegionStore::flush() {
+    wait_for_writer();
+    std::lock_guard<std::mutex> lock(mutex_);
+    bool ok = true;
+    for (const auto& [key, bytes] : take_dirty_locked()) {
+        if (write_file_atomic(region_path(key), bytes)) continue;
+        ok = false;
+        regions_[key].dirty = true;  // keep it for the next flush
     }
     return ok;
 }

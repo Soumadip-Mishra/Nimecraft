@@ -32,10 +32,19 @@ jobs:
       - name: Release build
         run: make release
 
+      - name: Package (Linux tar.gz)
+        run: cmake --build --preset release --target package
+
+      - name: Check the package
+        run: sh packaging/check_package.sh build/release/Nimecraft-*-Linux.tar.gz
+
+      - name: Install check (install.sh / uninstall.sh in a temporary HOME)
+        run: sh packaging/test_install.sh build/release/Nimecraft-*-Linux.tar.gz
+
       - uses: actions/upload-artifact@v7
         with:
           name: nimecraft-linux
-          path: build/release/nimecraft
+          path: build/release/Nimecraft-*-Linux.tar.gz
 
   windows-msvc:
     # The msvc preset targets Visual Studio 2022; windows-latest now ships only Visual Studio 2026.
@@ -52,10 +61,18 @@ jobs:
       - name: Tests
         run: build\msvc\Release\nimecraft_tests.exe
 
+      - name: Package (Windows zip)
+        working-directory: build/msvc
+        run: cpack -C Release
+
+      - name: Check the package
+        shell: bash
+        run: sh packaging/check_package.sh build/msvc/Nimecraft-*-win64.zip
+
       - uses: actions/upload-artifact@v7
         with:
           name: nimecraft-windows
-          path: build/msvc/Release/nimecraft.exe
+          path: build/msvc/Nimecraft-*-win64.zip
 
   windows-cross:
     runs-on: ubuntu-latest
@@ -72,3 +89,9 @@ jobs:
 
       - name: Cross-build and run the tests under Wine
         run: make win
+
+      - name: Package (Windows zip, MinGW)
+        run: cmake --build build/win-cross --target package
+
+      - name: Check the package
+        run: sh packaging/check_package.sh build/win-cross/Nimecraft-*-win64.zip
