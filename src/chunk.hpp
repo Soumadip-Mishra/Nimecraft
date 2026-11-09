@@ -9,6 +9,14 @@
 #include <cstdint>
 #include <map>
 #include <memory>
+#include <vector>
+
+// A passive creature stored with its column (region v3, M6 Task 6): MobType id, feet position,
+// yaw, health. Plain data, so chunk storage needs no creature code.
+struct SavedMob {
+    uint8_t type;
+    float x, y, z, yaw, health;
+};
 
 struct Chunk {
     ChunkPos pos{};
@@ -21,6 +29,9 @@ struct Chunk {
     // Block entities by Chunk::index (M4 Task 5): kilns, crates, cairns. Persisted (region v2);
     // ordered so saves come out the same every time.
     std::map<uint16_t, BlockEntity> entities;
+    // Saved creatures whose feet are in this chunk (region v3). Filled when a column is saved or
+    // loaded; World::insert_column moves them out to World::take_arrived_mobs.
+    std::vector<SavedMob> mobs;
 
     // Local coordinates are in [0, CHUNK); the caller guarantees the range.
     static int index(int lx, int ly, int lz);  // lx + lz*16 + ly*256

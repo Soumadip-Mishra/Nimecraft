@@ -3,6 +3,7 @@
 #include "block.hpp"
 #include "block_entities.hpp"
 #include "items.hpp"
+#include "mobs.hpp"
 
 #include <algorithm>
 #include <array>
@@ -23,7 +24,7 @@ namespace fs = std::filesystem;
 namespace {
 
 constexpr std::array<uint8_t, 4> MAGIC = {'N', 'M', 'C', 'R'};
-constexpr uint32_t REGION_VERSION = 2;  // written; every version from 1 up to it loads
+constexpr uint32_t REGION_VERSION = 3;  // written; every version from 1 up to it loads
 constexpr int REGION_COLUMNS = 32;  // a region is 32 x 32 columns
 constexpr std::size_t CHUNK_BLOCKS = CHUNK * CHUNK * CHUNK;
 constexpr std::size_t COLUMN_BLOCKS = SECTIONS * CHUNK_BLOCKS;
@@ -237,18 +238,74 @@ bool decode_entities(Reader& r, ColumnPos c, Column* col) {
     return true;
 }
 
+// ---- Creatures (v3) ----
+// Section: u32 mob_count, then per mob u8 type, f32 x, y, z, yaw, health.
+
+constexpr std::size_t MOB_BYTES = 21;
+constexpr float MOB_MIN_Y = -64.f, MOB_MAX_Y = 320.f;  // feet heights a saved creature may have
+
+// A passive type, finite values, health > 0, feet inside column c and within the height range.
+// Range checks happen on the floats, before anything casts them to int.
+bool savable(const SavedMob& m, ColumnPos c) {
+    if (m.type >= static_cast<uint8_t>(MobType::COUNT) || mob_def(static_cast<MobType>(m.type)).hostile) return false;
+    if (!std::isfinite(m.x) || !std::isfinite(m.y) || !std::isfinite(m.z) || !std::isfinite(m.yaw) ||
+        !std::isfinite(m.health) || !(m.health > 0.f))
+        return false;
+    const auto x0 = static_cast<float>(c.x * CHUNK), z0 = static_cast<float>(c.z * CHUNK);
+    return m.x >= x0 && m.x < x0 + CHUNK && m.z >= z0 && m.z < z0 + CHUNK && m.y >= MOB_MIN_Y && m.y <= MOB_MAX_Y;
+}
+
+std::vector<uint8_t> encode_mobs(const Column& col, ColumnPos c) {
+    std::vector<uint8_t> out;
+    uint32_t count = 0;
+    for (const auto& ch : col)
+        if (ch)
+            for (const SavedMob& m : ch->mobs) count += savable(m, c) ? 1u : 0u;
+    put_u32(out, count);
+    for (const auto& ch : col) {
+        if (!ch) continue;
+        for (const SavedMob& m : ch->mobs) {
+            if (!savable(m, c)) continue;  // never write what the loader rejects
+            out.push_back(m.type);
+            for (float v : {m.x, m.y, m.z, m.yaw, m.health}) put_f32(out, v);
+        }
+    }
+    return out;
+}
+
+// Reads a whole creature section into col (chunks already allocated, or nullptr to validate).
+bool decode_mobs(Reader& r, ColumnPos c, Column* col) {
+    uint32_t count = 0;
+    if (!r.u32(count) || count > r.left() / MOB_BYTES) return false;
+    for (uint32_t i = 0; i < count; ++i) {
+        uint32_t type = 0;
+        SavedMob m{};
+        if (!r.u8(type) || !r.f32(m.x) || !r.f32(m.y) || !r.f32(m.z) || !r.f32(m.yaw) || !r.f32(m.health))
+            return false;
+        m.type = static_cast<uint8_t>(type);
+        if (!savable(m, c)) return false;
+        if (col == nullptr) continue;
+        const int cy = static_cast<int>(std::clamp(m.y, 0.f, static_cast<float>(WORLD_HEIGHT - 1))) / CHUNK;
+        (*col)[static_cast<std::size_t>(cy)]->mobs.push_back(m);
+    }
+    return true;
+}
+
 std::optional<Column> decode_column(const RegionColumn& d, ColumnPos c) {
     std::optional<Column> col = decode(d.blocks);
     if (!col) return std::nullopt;
     Reader r(d.entities);
     if (!decode_entities(r, c, &*col) || !r.done()) return std::nullopt;
+    Reader m(d.mobs);
+    if (!decode_mobs(m, c, &*col) || !m.done()) return std::nullopt;
     return col;
 }
 
 using ColumnMap = std::map<std::pair<int, int>, RegionColumn>;
 
 // The whole file must be well formed, or the region counts as corrupt. Version 1 files have no
-// entity sections; they load as columns without block entities.
+// entity sections; they load as columns without block entities. Versions 1 and 2 have no creature
+// sections; they load as columns without creatures.
 std::optional<ColumnMap> parse_region(const std::vector<uint8_t>& bytes, std::pair<int, int> region) {
     Reader r(bytes);
     std::vector<uint8_t> magic;
@@ -272,6 +329,13 @@ std::optional<ColumnMap> parse_region(const std::vector<uint8_t>& bytes, std::pa
             if (!r.take(r.left() - probe.left(), data.entities)) return std::nullopt;
         } else {
             put_u32(data.entities, 0);
+        }
+        if (version >= 3) {
+            Reader probe = r;
+            if (!decode_mobs(probe, ColumnPos{cx, cz}, nullptr)) return std::nullopt;
+            if (!r.take(r.left() - probe.left(), data.mobs)) return std::nullopt;
+        } else {
+            put_u32(data.mobs, 0);
         }
         if (!decode_column(data, ColumnPos{cx, cz})) return std::nullopt;  // also catches duplicate cells
         if (!columns.emplace(std::make_pair(cx, cz), std::move(data)).second) return std::nullopt;
@@ -420,7 +484,7 @@ std::optional<Column> RegionStore::load_column(ColumnPos c) {
 }
 
 void RegionStore::save_column(ColumnPos c, const Column& col) {
-    RegionColumn bytes{encode(col), encode_entities(col, c)};
+    RegionColumn bytes{encode(col), encode_entities(col, c), encode_mobs(col, c)};
     std::lock_guard<std::mutex> lock(mutex_);
     Region& reg = region_locked(Key{floor_div(c.x, REGION_COLUMNS), floor_div(c.z, REGION_COLUMNS)});
     reg.columns.insert_or_assign(Key{c.x, c.z}, std::move(bytes));
@@ -441,6 +505,7 @@ bool RegionStore::flush() {
             put_u32(out, static_cast<uint32_t>(data.blocks.size()));
             out.insert(out.end(), data.blocks.begin(), data.blocks.end());
             out.insert(out.end(), data.entities.begin(), data.entities.end());
+            out.insert(out.end(), data.mobs.begin(), data.mobs.end());
         }
         if (write_file_atomic(region_path(key), out)) {
             reg.dirty = false;

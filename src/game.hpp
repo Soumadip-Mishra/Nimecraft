@@ -1,6 +1,7 @@
 // One running game: world load and save, the per-frame loop, input, mining and placing, item
 // entities, kilns, the inventory, crafting, kiln, and crate screens, Creative mode, survival
-// (vitals, eating, fall damage, death, grave cairns, bedroll respawn, sleeping), and the HUD.
+// (vitals, eating, fall damage, death, grave cairns, bedroll respawn, sleeping), creatures
+// (AI, spawning, despawning, melee, thorns, loot), and the HUD.
 // Device module (window, input, clock): decisions live in the tested logic modules; this class only
 // wires them to the window. Covered by --smoke and the Manual checks.
 #pragma once
@@ -11,6 +12,7 @@
 #include "inventory.hpp"
 #include "item_entities.hpp"
 #include "jobs.hpp"
+#include "mobs.hpp"
 #include "player.hpp"
 #include "raycast.hpp"
 #include "render.hpp"
@@ -55,6 +57,9 @@ private:
     void handle_input(float dt);
     void update_survival(const PlayerInput& in, Vector3 before, bool was_on_ground, float dt);
     void update_eating(float dt);
+    void update_mobs(float dt, bool alive, std::optional<uint32_t> hit_mob);
+    std::optional<uint32_t> attack_mob(const RayHit& block_hit);
+    void apply_mob_events(bool alive);
     void die();
     void start_respawn();
     void update_respawn();
@@ -88,6 +93,15 @@ private:
     GameMode mode_ = GameMode::Survival;
     Inventory inv_;
     ItemEntities items_;
+
+    // Creatures.
+    MobManager mobs_;
+    std::vector<Projectile> thorns_;
+    float spawn_clock_ = 0.f;          // spawn_tick runs once per second
+    uint32_t spawn_rng_ = 0x2545F491u;
+    uint32_t loot_rng_ = 0x7F4A7C15u;
+    std::optional<uint32_t> target_mob_;  // the creature under the crosshair within reach
+    int attacks_since_tick_ = 0;
 
     // Survival.
     Vitals vitals_;

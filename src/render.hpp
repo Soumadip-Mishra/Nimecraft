@@ -5,6 +5,7 @@
 #include "coords.hpp"
 #include "items.hpp"
 #include "mesher.hpp"
+#include "mobs.hpp"
 
 #include "raylib.h"
 
@@ -45,7 +46,7 @@ class Renderer {
 public:
     void init();                                  // after InitWindow
     void set_fog(FogRange range, Color sky);      // before draw
-    void set_daylight(float daylight);            // before draw: world_time's daylight_at
+    void set_daylight(float day_light);           // before draw: world_time's daylight_at
     void upload(ChunkPos p, const ChunkMesh& m);  // replaces; empty mesh = remove
     void remove(ChunkPos p);
     // Sun and moon discs at sun_angle, inside BeginMode3D before draw(): no depth writes, so
@@ -61,6 +62,10 @@ public:
     void draw_crack(int x, int y, int z, int stage);
     // A dropped item: a billboard of its icon (block atlas tile or item icon), size in blocks.
     void draw_item(const Camera3D& cam, ItemId id, Vector3 pos, float size, Color tint);
+    // A creature: its mob_model boxes from the mob atlas, turned to its yaw, legs swung by its walk
+    // distance, colored by tint (mob_tint: light, hurt red, fade alpha; alpha-blended below 255).
+    void draw_mob(const Mob& m, Color tint);
+    void draw_thorn(Vector3 pos);  // a small thorn projectile
     // The atlases for 2D icons (ui_draw); valid between init and shutdown.
     Texture2D block_atlas() const;
     Texture2D item_atlas() const;
@@ -74,6 +79,7 @@ private:
 
     Material material_{};
     Texture2D items_tex_{};
+    Texture2D mob_tex_{};
     bool ready_ = false;
     int loc_cam_ = -1, loc_fog_color_ = -1, loc_fog_start_ = -1, loc_fog_end_ = -1, loc_cutoff_ = -1,
         loc_daylight_ = -1;

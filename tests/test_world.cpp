@@ -387,3 +387,20 @@ TEST(test_world_set_marks_diagonal_neighbors) {
     CHECK(w.set(-16, 24, 0, blk::DIRT));
     CHECK(same_set(w.take_dirty(), {ChunkPos{-1, 1, 0}, ChunkPos{-1, 1, -1}}));
 }
+
+TEST(test_world_take_arrived_mobs) {
+    // Saved creatures riding in a column's chunks move to the arrival list when it is inserted.
+    World w(1);
+    CHECK(w.take_arrived_mobs().empty());
+    Column col = air_column(ColumnPos{-2, 3});
+    col[4]->mobs.push_back(SavedMob{0, -30.5f, 70.f, 50.5f, 1.f, 9.f});
+    col[9]->mobs.push_back(SavedMob{2, -20.5f, 150.f, 60.5f, 2.f, 3.f});
+    w.insert_column(ColumnPos{-2, 3}, std::move(col));
+    const std::vector<SavedMob> got = w.take_arrived_mobs();
+    CHECK(got.size() == 2);
+    if (got.size() == 2) CHECK(got[0].x == -30.5f && got[1].type == 2 && got[1].y == 150.f);  // chunk order
+    for (int y = 0; y < SECTIONS; ++y) CHECK(w.chunk(ChunkPos{-2, y, 3})->mobs.empty());
+    CHECK(w.take_arrived_mobs().empty());  // taken once
+    w.insert_column(ColumnPos{0, 0}, air_column(ColumnPos{0, 0}));
+    CHECK(w.take_arrived_mobs().empty());
+}

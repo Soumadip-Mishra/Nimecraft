@@ -5,8 +5,13 @@
 //   i32 cx, i32 cz, u32 len, len bytes of RLE pairs (u16 run >= 1, u16 id < blk::COUNT)
 //   covering exactly 16 * 4096 blocks (chunk 0 first, each chunk in Chunk::index order),
 //   then (version 2, M4) the column's block entities: u32 be_count, per entity i32 x, y, z, u8 kind
-//   (0 kiln, 1 crate, 2 cairn), payload (see storage.cpp). Version 2 is written; versions 1 and 2
-//   load (v1 columns have no block entities).
+//   (0 kiln, 1 crate, 2 cairn), payload (see storage.cpp),
+//   then (version 3, M6) its passive creatures: u32 mob_count, per mob u8 type, f32 x, y, z, yaw,
+//   health (Chunk::mobs of every chunk, in chunk order; hostile types are never written, and a
+//   hostile or unknown type, a non-finite float, health <= 0, feet outside the column, or feet y
+//   outside -64..320 makes the file corrupt, and such a creature is never written).
+//   Version 3 is written; versions 1, 2, and 3 load (v1 columns have no block entities, v1 and v2
+//   columns no creatures). A loaded creature goes into the chunk holding its feet (y clamped).
 // world.meta: "key=value" lines: version=1, seed, px, py, pz, yaw, pitch, then the optional keys
 // added later (time, M3; mode, inv, armor, sel, M4; vitals, spawn, M5). Unknown keys are ignored; non-finite floats or missing required keys
 // make the file invalid.
@@ -26,9 +31,10 @@
 #include <utility>
 #include <vector>
 
-// Internal to RegionStore: one column's validated bytes, RLE blocks and its entity section.
+// Internal to RegionStore: one column's validated bytes, RLE blocks, its entity section, and its
+// creature section.
 struct RegionColumn {
-    std::vector<uint8_t> blocks, entities;
+    std::vector<uint8_t> blocks, entities, mobs;
 };
 
 class RegionStore {

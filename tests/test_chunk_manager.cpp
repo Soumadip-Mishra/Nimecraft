@@ -536,3 +536,30 @@ TEST(test_manager_remeshes_on_diagonal_arrival) {
     for (const MeshResult& r : meshes)
         if (r.pos.x == 0 && r.pos.z == 0) CHECK(!w.chunk(r.pos)->is_empty());
 }
+
+TEST(test_manager_unload_hook) {
+    // The hook sees each unloading column before it is saved; what it stores there is persisted.
+    test::TempDir tmp;
+    RegionStore store(tmp.path());
+    World w(1);
+    ThreadPool pool(2);
+    std::vector<ColumnPos> seen;
+    {
+        ChunkManager m(w, pool, &store, 2);
+        m.set_unload_hook([&seen](ColumnPos c, Column& col) {
+            seen.push_back(c);
+            if (c == ColumnPos{0, 0}) {
+                col[4]->mobs.push_back(SavedMob{0, 3.5f, 70.f, 4.5f, 0.f, 10.f});
+                col[4]->modified = true;
+            }
+        });
+        m.settle(ColumnPos{0, 0});
+        CHECK(seen.empty());
+        m.settle(ColumnPos{10, 0});
+    }
+    CHECK(std::find(seen.begin(), seen.end(), ColumnPos{0, 0}) != seen.end());
+    CHECK(std::find(seen.begin(), seen.end(), ColumnPos{10, 0}) == seen.end());  // still loaded
+    const std::optional<Column> col = store.load_column(ColumnPos{0, 0});
+    CHECK(col.has_value() && (*col)[4]->mobs.size() == 1);
+    CHECK(!store.load_column(ColumnPos{1, 0}).has_value());  // untouched columns stay unsaved
+}

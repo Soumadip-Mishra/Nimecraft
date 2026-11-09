@@ -122,13 +122,18 @@ void ChunkManager::integrate_meshes() {
     }
 }
 
+void ChunkManager::set_unload_hook(std::function<void(ColumnPos, Column&)> hook) {
+    unload_hook_ = std::move(hook);
+}
+
 void ChunkManager::unload_far() {
     for (ColumnPos c : world_.loaded_columns())
         if (!within(c, rd_ + 2)) unload(c);
 }
 
 void ChunkManager::unload(ColumnPos c) {
-    const Column col = world_.remove_column(c);
+    Column col = world_.remove_column(c);
+    if (unload_hook_) unload_hook_(c, col);
     if (store_ != nullptr &&
         std::any_of(col.begin(), col.end(), [](const auto& ch) { return ch && ch->modified; }))
         store_->save_column(c, col);

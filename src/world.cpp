@@ -21,8 +21,17 @@ void World::insert_column(ColumnPos c, Column col) {
         if (!col[i]) col[i] = std::make_unique<Chunk>();
         col[i]->pos = ChunkPos{c.x, static_cast<int>(i), c.z};
         dirty_.insert(col[i]->pos);
+        std::vector<SavedMob>& mobs = col[i]->mobs;
+        arrived_mobs_.insert(arrived_mobs_.end(), mobs.begin(), mobs.end());
+        mobs.clear();
     }
     columns_.insert_or_assign(c, std::move(col));
+}
+
+std::vector<SavedMob> World::take_arrived_mobs() {
+    std::vector<SavedMob> out;
+    out.swap(arrived_mobs_);
+    return out;
 }
 
 Column World::remove_column(ColumnPos c) {

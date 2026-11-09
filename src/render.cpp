@@ -2,6 +2,7 @@
 
 #include "block.hpp"
 #include "frustum.hpp"
+#include "mob_models.hpp"
 
 #include "raymath.h"
 #include "rlgl.h"
@@ -646,6 +647,11 @@ void Renderer::init() {
     items_tex_ = LoadTextureFromImage(items);
     UnloadImage(items);
     SetTextureFilter(items_tex_, TEXTURE_FILTER_POINT);
+    // The pixels stay owned by the vector: LoadTextureFromImage copies them to the GPU.
+    std::vector<Color> mob_px = mob_atlas_pixels();
+    const Image mobs{mob_px.data(), MOB_ATLAS_PX, MOB_ATLAS_PX, 1, PIXELFORMAT_UNCOMPRESSED_R8G8B8A8};
+    mob_tex_ = LoadTextureFromImage(mobs);
+    SetTextureFilter(mob_tex_, TEXTURE_FILTER_POINT);
     ready_ = true;
 }
 
@@ -696,13 +702,60 @@ void Renderer::draw_item(const Camera3D& cam, ItemId id, Vector3 pos, float size
     DrawBillboardRec(cam, tex, icon_rect(id), Vector3{pos.x, pos.y + size / 2, pos.z}, Vector2{size, size}, tint);
 }
 
+void Renderer::draw_mob(const Mob& m, Color tint) {
+    // Per face: 4 corners as picks of -half (0) or +half (1), counter-clockwise from outside.
+    static constexpr int FACE[6][4][3] = {
+        {{1, 0, 0}, {1, 1, 0}, {1, 1, 1}, {1, 0, 1}}, {{0, 0, 1}, {0, 1, 1}, {0, 1, 0}, {0, 0, 0}},
+        {{0, 1, 0}, {0, 1, 1}, {1, 1, 1}, {1, 1, 0}}, {{0, 0, 0}, {1, 0, 0}, {1, 0, 1}, {0, 0, 1}},
+        {{1, 0, 1}, {1, 1, 1}, {0, 1, 1}, {0, 0, 1}}, {{0, 0, 0}, {0, 1, 0}, {1, 1, 0}, {1, 0, 0}},
+    };
+    const bool blend = tint.a < 255;
+    rlDrawRenderBatchActive();
+    if (blend) BeginBlendMode(BLEND_ALPHA);
+    rlPushMatrix();
+    rlTranslatef(m.pos.x, m.pos.y, m.pos.z);
+    rlRotatef(-m.yaw * RAD2DEG, 0.f, 1.f, 0.f);  // the model's +X turns to (cos yaw, 0, sin yaw)
+    rlSetTexture(mob_tex_.id);
+    for (const BoxPart& p : mob_model(m.type)) {
+        const float tile_u = static_cast<float>(p.tile % MOB_ATLAS_TILES) / MOB_ATLAS_TILES;
+        const float tile_v = static_cast<float>(p.tile / MOB_ATLAS_TILES) / MOB_ATLAS_TILES;
+        const float u[4] = {tile_u + 1.f / MOB_ATLAS_TILES, tile_u + 1.f / MOB_ATLAS_TILES, tile_u, tile_u};
+        const float v[4] = {tile_v + 1.f / MOB_ATLAS_TILES, tile_v, tile_v, tile_v + 1.f / MOB_ATLAS_TILES};
+        const float hx = p.size.x / 2, hy = p.size.y / 2, hz = p.size.z / 2;
+        rlPushMatrix();
+        rlTranslatef(p.offset.x, p.offset.y + hy, p.offset.z);  // pivot: the top face center
+        const float swing = part_swing(p, m.walk);
+        if (swing != 0.f) rlRotatef(swing * RAD2DEG, 0.f, 0.f, 1.f);
+        rlTranslatef(0.f, -hy, 0.f);
+        rlBegin(RL_QUADS);
+        rlColor4ub(tint.r, tint.g, tint.b, tint.a);
+        for (const auto& face : FACE)
+            for (int c = 0; c < 4; ++c) {
+                rlTexCoord2f(u[c], v[c]);
+                rlVertex3f(face[c][0] ? hx : -hx, face[c][1] ? hy : -hy, face[c][2] ? hz : -hz);
+            }
+        rlEnd();
+        rlPopMatrix();
+    }
+    rlSetTexture(0);
+    rlPopMatrix();
+    if (blend) {
+        rlDrawRenderBatchActive();
+        EndBlendMode();
+    }
+}
+
+void Renderer::draw_thorn(Vector3 pos) {
+    DrawCube(pos, 0.12f, 0.12f, 0.12f, Color{150, 170, 60, 255});
+}
+
 void Renderer::set_fog(FogRange range, Color sky) {
     fog_ = range;
     sky_ = sky;
 }
 
-void Renderer::set_daylight(float daylight) {
-    daylight_ = daylight;
+void Renderer::set_daylight(float day_light) {
+    daylight_ = day_light;
 }
 
 void Renderer::draw_sky(const Camera3D& cam, float sun_angle) {
@@ -803,6 +856,7 @@ void Renderer::shutdown() {
     if (ready_) {
         UnloadMaterial(material_);  // also unloads the block atlas texture
         UnloadTexture(items_tex_);
+        UnloadTexture(mob_tex_);
     }
     ready_ = false;
 }

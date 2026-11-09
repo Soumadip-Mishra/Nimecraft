@@ -6,8 +6,10 @@
 #include "coords.hpp"
 #include "death.hpp"
 #include "mining.hpp"
+#include "mob_models.hpp"
 #include "platform.hpp"
 #include "recipes.hpp"
+#include "spawning.hpp"
 
 #include "raylib.h"
 #include "raymath.h"
@@ -41,6 +43,9 @@ constexpr float SCREEN_REACH = 8.f;  // a kiln or crate screen closes beyond thi
 constexpr float HURT_FLASH_S = 0.35f, TOAST_S = 3.f;
 constexpr int SMOKE_DEATH_FROM = 440, SMOKE_DEATH_TO = 460;  // --smoke draws the death screen
 const ColumnPos ORIGIN_COLUMN{0, 0};                        // spawn_player's column
+constexpr float SPAWN_PERIOD_S = 1.f, SPAWN_CLOCK_MAX = 2.f;  // spawn_tick once per second
+constexpr float MOB_REACH = 3.f, SLEEP_HOSTILE_RANGE = 8.f;
+constexpr float THORN_AIM_UP = 0.9f;  // thorns aim at the player's middle
 
 Vector3 on_top_of(BlockPos b) {
     return Vector3{static_cast<float>(b.x) + 0.5f, static_cast<float>(b.y + 1), static_cast<float>(b.z) + 0.5f};
@@ -121,8 +126,8 @@ void draw_crosshair() {
 }
 
 void draw_debug(const Player& p, const World& w, const ChunkManager& mgr, int drawn, const WorldTime& t,
-                std::size_t items) {
-    constexpr int LINES = 7;
+                std::size_t items, std::size_t mobs) {
+    constexpr int LINES = 8;
     char lines[LINES][96];
     std::snprintf(lines[0], sizeof lines[0], "FPS %d", GetFPS());
     std::snprintf(lines[1], sizeof lines[1], "XYZ %.2f %.2f %.2f", static_cast<double>(p.pos.x),
@@ -132,6 +137,7 @@ void draw_debug(const Player& p, const World& w, const ChunkManager& mgr, int dr
     std::snprintf(lines[4], sizeof lines[4], "Chunks drawn %d", drawn);
     std::snprintf(lines[5], sizeof lines[5], "Time %d %s (F4 +1000)", t.day_tick(), t.is_night() ? "night" : "day");
     std::snprintf(lines[6], sizeof lines[6], "Dropped items %zu", items);
+    std::snprintf(lines[7], sizeof lines[7], "Creatures %zu", mobs);
     DrawRectangle(6, 6, 300, LINES * 20 + 8, Color{0, 0, 0, 140});
     for (int i = 0; i < LINES; ++i) DrawText(lines[i], 12, 12 + i * 20, 18, WHITE);
 }
@@ -208,6 +214,8 @@ Game::Game(const CliOptions& o)
     captured_ = !o.smoke && !dead_;
     if (captured_) DisableCursor();
     start_ = GetTime();
+    // A column leaving memory takes its creatures along: passive ones are saved with it.
+    mgr_.set_unload_hook([this](ColumnPos c, Column& col) { stash_mobs(col, mobs_.take_column(c)); });
 }
 
 Game::~Game() {
@@ -292,8 +300,10 @@ void Game::update_survival(const PlayerInput& in, Vector3 before, bool was_on_gr
     }
     vin.jumps = (in.jump && was_on_ground && !player_.on_ground && player_.vel.y > 0.f) ? 1 : 0;
     vin.blocks_mined = mined_since_tick_;
+    vin.attacks = attacks_since_tick_;
     vin.eye_in_water = eye_in_water(player_, world_);
     mined_since_tick_ = 0;
+    attacks_since_tick_ = 0;
     vitals_tick(vitals_, vin, dt, mode_);
     damage_tick(damage_, dt);
 
@@ -386,6 +396,65 @@ void Game::update_eating(float dt) {
     if (--held.count == 0) held = ItemStack{};
 }
 
+void Game::update_mobs(float dt, bool alive, std::optional<uint32_t> hit_mob) {
+    const float day_light = daylight_at(time_.day_tick());
+    AiContext ctx{};
+    ctx.player_pos = player_.pos;
+    ctx.player_alive = alive && mode_ == GameMode::Survival;  // hostiles ignore Creative players
+    ctx.daylight = day_light;
+    ctx.world = &world_;
+    ctx.last_attacker_hit_mob = hit_mob;
+    mobs_.update(world_, ctx, dt);
+    spawn_clock_ = std::min(spawn_clock_ + std::max(0.f, dt), SPAWN_CLOCK_MAX);
+    while (spawn_clock_ >= SPAWN_PERIOD_S) {
+        spawn_clock_ -= SPAWN_PERIOD_S;
+        spawn_tick(mobs_, world_, player_.pos, day_light, spawn_rng_, SpawnCaps{});
+    }
+    despawn_tick(mobs_, player_.pos, dt);
+    apply_mob_events(alive);
+
+    // Thorns hurt a Survival player; anyone else they pass through harmlessly.
+    Vitals scratch;
+    DamageState scratch_dmg;
+    const bool hurtable = alive && mode_ == GameMode::Survival;
+    update_projectiles(thorns_, world_, player_.pos, hurtable ? vitals_ : scratch, hurtable ? damage_ : scratch_dmg,
+                       armor_points(inv_), dt);
+
+    for (const Mob& m : mobs_.take_dead()) {
+        if (m.state == AiState::Fade) continue;  // burnt away by daylight: nothing left behind
+        for (const ItemStack& s : roll_loot(mob_def(m.type), loot_rng_)) items_.spawn(m.pos, s);
+    }
+}
+
+void Game::apply_mob_events(bool alive) {
+    const bool hurtable = alive && mode_ == GameMode::Survival;
+    for (const MobEvent& e : mobs_.take_events()) {
+        const Mob* m = mobs_.find(e.mob);
+        if (m == nullptr) continue;
+        const MobDef& d = mob_def(m->type);
+        if (e.kind == MobEvent::Shoot) {
+            thorns_.push_back(make_thorn(e.from, Vector3{player_.pos.x, player_.pos.y + THORN_AIM_UP, player_.pos.z}, d.damage));
+        } else if (hurtable && take_damage(vitals_, damage_, d.damage, armor_points(inv_))) {
+            apply_knockback(player_.vel, player_.pos, m->pos);
+        }
+    }
+}
+
+// The creature under the crosshair within MOB_REACH and nearer than the targeted block; a left
+// click hits it (and the click does not also mine).
+std::optional<uint32_t> Game::attack_mob(const RayHit& block_hit) {
+    const float max = block_hit.hit ? std::min(MOB_REACH, block_hit.distance) : MOB_REACH;
+    target_mob_ = mobs_.raycast(player_eye(player_), player_look(player_), max);
+    if (!target_mob_ || !captured_ || swallow_click_ || screen_ != Screen::None) return std::nullopt;
+    if (!IsMouseButtonPressed(MOUSE_BUTTON_LEFT)) return std::nullopt;
+    const Mob* m = mobs_.find(*target_mob_);
+    ItemStack& held = inv_.held();
+    if (!mobs_.damage(*target_mob_, attack_damage(held, mob_def(m->type)), player_.pos)) return std::nullopt;
+    ++attacks_since_tick_;
+    if (mode_ == GameMode::Survival) wear_tool(held);
+    return target_mob_;
+}
+
 void Game::drop_stack(ItemStack s, Vector3 from) {
     if (s.empty()) return;
     items_.spawn(Vector3Add(from, Vector3Scale(player_look(player_), 0.6f)), s);
@@ -455,11 +524,12 @@ void Game::use_block(const RayHit& hit) {
         }
         if (b == blk::BEDROLL) {  // sets the respawn point; at night, also sleeps until dawn
             bedroll_ = target;
-            if (can_sleep(time_, false)) {  // M6 supplies whether hostiles are within 8 blocks
+            if (can_sleep(time_, hostiles_within(mobs_, player_.pos, SLEEP_HOSTILE_RANGE))) {
                 sleep_until_dawn(time_);
                 toast("You slept until dawn - respawn point set");
             } else {
-                toast("Respawn point set - you can sleep only at night");
+                toast(time_.is_night() ? "Respawn point set - you cannot sleep with monsters nearby"
+                                       : "Respawn point set - you can sleep only at night");
             }
             return;
         }
@@ -717,6 +787,11 @@ void Game::draw(const RayHit& hit) {
         drawn_ = renderer_.draw(cam, static_cast<float>(GetScreenWidth()) / static_cast<float>(h));
         for (const ItemEntity& e : items_.all())
             renderer_.draw_item(cam, e.stack.id, e.pos, ITEM_DRAW_SIZE, light_tint(world_, e.pos, day_light));
+        for (const Mob& m : mobs_.all()) {
+            const Vector3 mid{m.pos.x, m.pos.y + mob_def(m.type).height / 2, m.pos.z};
+            renderer_.draw_mob(m, mob_tint(m, light_tint(world_, mid, day_light)));
+        }
+        for (const Projectile& t : thorns_) renderer_.draw_thorn(t.pos);
         if (hit.hit) {
             renderer_.draw_highlight(hit.x, hit.y, hit.z);
             if (mining_ && mode_ == GameMode::Survival) {
@@ -743,7 +818,7 @@ void Game::draw(const RayHit& hit) {
         if (dead_ || smoke_death)
             draw_death_screen(death_note_, CheckCollisionPointRec(GetMousePosition(), death_button_rect()));
         if (respawning_) draw_centered_text("Respawning...", GetScreenHeight() / 2 - 15, 30, WHITE);
-        if (debug_) draw_debug(player_, world_, mgr_, drawn_, time_, items_.all().size());
+        if (debug_) draw_debug(player_, world_, mgr_, drawn_, time_, items_.all().size(), mobs_.all().size());
     } else {
         draw_centered_text("Generating world...", GetScreenHeight() / 2 - 15, 30, WHITE);
     }
@@ -770,6 +845,7 @@ bool Game::frame() {
     handle_input(dt);
 
     mgr_.update(!spawned_ ? spawn_col_ : (respawning_ ? respawn_col_ : column_at(player_.pos)));
+    mobs_.restore(world_.take_arrived_mobs(), spawn_rng_);  // creatures saved with loaded columns
     if (!spawned_ && mgr_.column_ready(spawn_col_)) {
         if (!meta_) player_ = spawn_player(world_);
         spawned_ = true;
@@ -779,14 +855,18 @@ bool Game::frame() {
     RayHit hit{};
     if (spawned_) {
         const bool alive = !dead_ && !respawning_;
+        std::optional<uint32_t> hit_mob;
+        target_mob_.reset();
         if (alive) {
             hit = raycast_voxel(world_, player_eye(player_), player_look(player_), REACH);
-            update_mining(hit, dt);
+            hit_mob = attack_mob(hit);
+            update_mining(target_mob_ ? RayHit{} : hit, dt);  // a creature in front shields the block
             use_block(hit);
             update_eating(dt);
         }
         items_.update(world_, dt);
         if (alive) items_.collect(player_.pos, inv_);
+        update_mobs(dt, alive, hit_mob);
         tick_kilns(dt);
         if (screen_ == Screen::Kiln || screen_ == Screen::Crate) {
             const Vector3 c{open_pos_.x + 0.5f, open_pos_.y + 0.5f, open_pos_.z + 0.5f};
@@ -820,8 +900,18 @@ bool Game::save() {
         meta_->vitals = vitals_;
         meta_->spawn = bedroll_;
     }
-    for (ColumnPos c : world_.loaded_columns())
-        if (column_modified(world_, c)) store_->save_column(c, copy_column(world_, c));
+    for (ColumnPos c : world_.loaded_columns()) {
+        const std::vector<SavedMob> mobs = mobs_.saved_in(c);  // passive creatures standing in c
+        if (!column_modified(world_, c) && mobs.empty()) continue;
+        Column col = copy_column(world_, c);
+        stash_mobs(col, mobs);
+        // The saved copy now holds creatures: mark the live chunks too, so the column is rewritten
+        // when it unloads after they leave instead of leaving them on disk to come back twice.
+        for (int y = 0; y < SECTIONS; ++y)
+            if (col[static_cast<std::size_t>(y)] && col[static_cast<std::size_t>(y)]->modified)
+                if (Chunk* live = world_.chunk(ChunkPos{c.x, y, c.z})) live->modified = true;
+        store_->save_column(c, col);
+    }
     bool ok = true;
     if (!store_->flush()) {
         std::fputs("nimecraft: could not write some region files\n", stderr);

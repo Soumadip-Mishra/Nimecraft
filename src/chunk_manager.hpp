@@ -11,6 +11,7 @@
 #include <cstddef>
 #include <cstdint>
 #include <deque>
+#include <functional>
 #include <unordered_map>
 #include <unordered_set>
 #include <vector>
@@ -40,6 +41,9 @@ public:
     bool column_ready(ColumnPos c) const;  // loaded and all 4 horizontal neighbors loaded
     std::size_t pending_jobs() const;
     void settle(ColumnPos center);  // test helper: update + wait until nothing pending or schedulable
+    // Called on the main thread with each column as it unloads, before it is saved (a column with
+    // any modified chunk is saved), so the caller can store what lives in it (creatures).
+    void set_unload_hook(std::function<void(ColumnPos, Column&)> hook);
 
 private:
     struct GenResult {
@@ -67,6 +71,7 @@ private:
     World& world_;
     ThreadPool& pool_;
     RegionStore* store_;
+    std::function<void(ColumnPos, Column&)> unload_hook_;
     int rd_;
     ColumnPos center_{0, 0};
     std::vector<ColumnPos> disc_;  // offsets with dx^2 + dz^2 <= rd^2, nearest first

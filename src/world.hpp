@@ -19,8 +19,10 @@ public:
 
     bool column_loaded(ColumnPos c) const;
     // Replaces any column at c and marks its 16 chunks dirty. Null slots are filled with AIR
-    // chunks, and every chunk's pos is set to {c.x, y, c.z}.
+    // chunks, and every chunk's pos is set to {c.x, y, c.z}. Saved creatures in its chunks move to
+    // the arrival list (chunk order).
     void insert_column(ColumnPos c, Column col);
+    std::vector<SavedMob> take_arrived_mobs();  // returns and clears the arrival list
     // Returns the column (empty Column if absent) and drops its chunks from the dirty set.
     Column remove_column(ColumnPos c);
     std::vector<ColumnPos> loaded_columns() const;  // unspecified order
@@ -52,4 +54,5 @@ private:
     uint32_t seed_;
     std::unordered_map<ColumnPos, Column, ColumnPosHash> columns_;
     std::unordered_set<ChunkPos, ChunkPosHash> dirty_;
+    std::vector<SavedMob> arrived_mobs_;
 };
