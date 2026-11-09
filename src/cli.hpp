@@ -1,4 +1,4 @@
-// Command-line parsing for ./nimecraft [--world NAME] [--seed N] [--rd 4..16] [--smoke].
+// Command-line parsing for ./nimecraft [--world NAME] [--seed N] [--rd 4..16] [--creative] [--smoke].
 #pragma once
 
 #include <cstdint>
@@ -11,6 +11,7 @@ struct CliOptions {
     std::optional<uint32_t> seed;
     int rd = 8;
     bool smoke = false;
+    bool creative = false;  // a new world starts in Creative mode; a saved world keeps its mode
 };
 
 // args are the arguments after the program name. nullopt on any invalid argument: an unknown

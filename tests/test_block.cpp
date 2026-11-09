@@ -24,8 +24,8 @@ TEST(test_block_ids) {
     CHECK(blk::LEAVES == 6);
     CHECK(blk::PLANKS == 7);
     CHECK(blk::DEEPSTONE == 8);
-    CHECK(blk::COUNT == 29);  // M3 appended TORCH, LANTERN, GLOWCAP
-    CHECK(T_COUNT == 34);
+    CHECK(blk::COUNT == 33);  // M4 appended WORKBENCH, KILN, CRATE, GLASS
+    CHECK(T_COUNT == 45);     // M4: 7 station and glass tiles, 4 crack stages
     CHECK(PX == 0 && NX == 1 && PY == 2 && NY == 3 && PZ == 4 && NZ == 5);
 }
 
@@ -55,18 +55,27 @@ TEST(test_block_ids_m3) {
     CHECK(blk::TORCH == 26);
     CHECK(blk::LANTERN == 27);
     CHECK(blk::GLOWCAP == 28);
-    CHECK(blk::COUNT == 29);
+}
+
+// M4 README: the appended station and glass ids.
+TEST(test_block_ids_m4) {
+    CHECK(blk::WORKBENCH == 29);
+    CHECK(blk::KILN == 30);
+    CHECK(blk::CRATE == 31);
+    CHECK(blk::GLASS == 32);
+    CHECK(blk::COUNT == 33);
 }
 
 // M2 Task 1: LEAVES and PINE_LEAVES are Cutout, WATER and ICE Translucent, TALL_GRASS and FLOWER
 // Cross plants in Cutout, WATER a Liquid; every other block is an Opaque Cube.
 // M3 Task 1: TORCH and GLOWCAP are Cutout Cross plants, LANTERN a Cutout Cube.
+// M4: GLASS is Translucent (the spec's sorted transparent pass: water, glass, leaves).
 TEST(test_block_layers_shapes) {
     for (BlockId id = 1; id < blk::COUNT; ++id) {
         const BlockDef& d = block_def(id);
         const bool cross = id == blk::TALL_GRASS || id == blk::FLOWER || id == blk::TORCH || id == blk::GLOWCAP;
         const bool cutout = id == blk::LEAVES || id == blk::PINE_LEAVES || id == blk::LANTERN || cross;
-        const bool translucent = id == blk::WATER || id == blk::ICE;
+        const bool translucent = id == blk::WATER || id == blk::ICE || id == blk::GLASS;
         if (cutout) CHECK(d.layer == Layer::Cutout);
         else if (translucent) CHECK(d.layer == Layer::Translucent);
         else CHECK(d.layer == Layer::Opaque);
@@ -153,13 +162,13 @@ TEST(test_block_defs_complete) {
 // M1: "AIR not solid/opaque; all others solid and opaque". M2 adds blocks that are walked through
 // (WATER, TALL_GRASS, FLOWER) and blocks that are seen through (LEAVES, PINE_LEAVES, ICE, and the
 // walk-through ones). M3 adds TORCH and GLOWCAP (walk-through) and LANTERN (solid, Cutout, so seen
-// through). DEEPSTONE and WATER are the unbreakable ones.
+// through). M4 adds GLASS (solid, seen through). DEEPSTONE and WATER are the unbreakable ones.
 TEST(test_block_flags) {
     for (BlockId id = 1; id < blk::COUNT; ++id) {
         const bool walk_through = id == blk::WATER || id == blk::TALL_GRASS || id == blk::FLOWER ||
                                   id == blk::TORCH || id == blk::GLOWCAP;
         const bool see_through = walk_through || id == blk::LEAVES || id == blk::PINE_LEAVES ||
-                                 id == blk::ICE || id == blk::LANTERN;
+                                 id == blk::ICE || id == blk::LANTERN || id == blk::GLASS;
         CHECK(block_def(id).solid == !walk_through);
         CHECK(block_def(id).opaque == !see_through);
         CHECK(block_def(id).breakable == (id != blk::DEEPSTONE && id != blk::WATER));
@@ -171,9 +180,9 @@ TEST(test_block_def_id_boundary) {
     CHECK(&block_def(blk::COUNT) == &block_def(blk::AIR));
     CHECK(&block_def(999) == &block_def(blk::AIR));
     CHECK(&block_def(65535) == &block_def(blk::AIR));
-    CHECK(&block_def(blk::COUNT - 1) == &block_def(blk::GLOWCAP));
-    CHECK(&block_def(blk::GLOWCAP) != &block_def(blk::AIR));
-    CHECK(block_def(blk::COUNT - 1).emission == 7);
+    CHECK(&block_def(blk::COUNT - 1) == &block_def(blk::GLASS));
+    CHECK(&block_def(blk::GLASS) != &block_def(blk::AIR));
+    CHECK(block_def(blk::COUNT - 1).solid);
 }
 
 TEST(test_block_names_distinct) {
@@ -221,4 +230,26 @@ TEST(test_block_defs_m3_tiles) {
     CHECK(block_def(blk::TORCH).breakable);
     CHECK(block_def(blk::LANTERN).breakable);
     CHECK(block_def(blk::GLOWCAP).breakable);
+}
+
+// M4: station and glass tiles. GLASS lets light through (opacity 0) like the other see-through
+// blocks that are not leaves, water, or ice.
+TEST(test_block_defs_m4_tiles) {
+    const BlockDef& bench = block_def(blk::WORKBENCH);
+    CHECK(bench.tiles[PY] == T_WORKBENCH_TOP);
+    CHECK(bench.tiles[NY] == T_PLANKS);
+    CHECK(bench.tiles[PX] == T_WORKBENCH_SIDE);
+    CHECK(bench.tiles[NZ] == T_WORKBENCH_SIDE);
+    const BlockDef& kiln = block_def(blk::KILN);
+    CHECK(kiln.tiles[PY] == T_KILN_TOP);
+    CHECK(kiln.tiles[NY] == T_KILN_TOP);
+    CHECK(kiln.tiles[PX] == T_KILN_SIDE);
+    const BlockDef& crate = block_def(blk::CRATE);
+    CHECK(crate.tiles[PY] == T_CRATE_TOP);
+    CHECK(crate.tiles[NY] == T_CRATE_TOP);
+    CHECK(crate.tiles[PZ] == T_CRATE_SIDE);
+    CHECK(all_tiles(block_def(blk::GLASS), T_GLASS));
+    CHECK(block_def(blk::GLASS).opacity == 0);
+    CHECK(block_def(blk::KILN).opacity == 15);
+    CHECK(T_CRACK_0 + 1 == T_CRACK_1 && T_CRACK_1 + 1 == T_CRACK_2 && T_CRACK_2 + 1 == T_CRACK_3);
 }

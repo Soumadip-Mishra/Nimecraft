@@ -1,5 +1,6 @@
 // Tests for the window-free part of src/render.*: the generated block atlas.
 #include "block.hpp"
+#include "items.hpp"
 #include "render.hpp"
 #include "test.hpp"
 
@@ -28,8 +29,9 @@ TEST(test_render_atlas_deterministic) {
     // tile, and every unused cell, is fully opaque.
     for (int t = 0; t < 64; ++t) {
         const bool cutout = t == T_LEAVES || t == T_PINE_LEAVES || t == T_TALL_GRASS || t == T_FLOWER ||
-                            t == T_TORCH || t == T_LANTERN || t == T_GLOWCAP;  // M3 Task 1
-        const bool translucent = t == T_WATER || t == T_ICE;
+                            t == T_TORCH || t == T_LANTERN || t == T_GLOWCAP ||  // M3 Task 1
+                            (t >= T_CRACK_0 && t <= T_CRACK_3);                  // M4 Task 3 overlay
+        const bool translucent = t == T_WATER || t == T_ICE || t == T_GLASS;     // M4: GLASS
         int clear = 0, solid = 0, partial = 0;
         for (int y = 0; y < 16; ++y)
             for (int x = 0; x < 16; ++x) {
@@ -49,7 +51,7 @@ TEST(test_render_atlas_deterministic) {
         }
     }
 
-    // Cells past T_COUNT (31) are unused and marked magenta: cell 63 is the bottom-right one.
+    // Cells past T_COUNT are unused and marked magenta: cell 63 is the bottom-right one.
     const unsigned char* unused = pixel(a, 127, 127);
     CHECK(unused[0] == 255 && unused[1] == 0 && unused[2] == 255);
     // Used tiles are never magenta; grass top (tile 0) is greener than it is red or blue.
@@ -61,7 +63,7 @@ TEST(test_render_atlas_deterministic) {
     MemFree(b.data);
 }
 
-// Every used tile is its own art: no two of the T_COUNT (31) tiles are pixel-identical, and none is
+// Every used tile is its own art: no two of the T_COUNT tiles are pixel-identical, and none is
 // the magenta of an unused cell.
 TEST(test_render_atlas_tiles_distinct) {
     const Image a = generate_atlas();
@@ -77,4 +79,48 @@ TEST(test_render_atlas_tiles_distinct) {
         CHECK(!same(s, 63));
     }
     MemFree(a.data);
+}
+
+// M4 Task 6: the 128x128 item atlas. Every non-block item (STICK..END-1) has its own icon cell:
+// some transparent and some opaque pixels (alpha 0 or 255 only), all icons distinct; unused cells
+// are magenta like the block atlas. Deterministic.
+TEST(test_render_item_atlas) {
+    const Image a = generate_item_atlas();
+    const Image b = generate_item_atlas();
+    CHECK(a.width == 128 && a.height == 128);
+    CHECK(a.format == PIXELFORMAT_UNCOMPRESSED_R8G8B8A8);
+    CHECK(std::memcmp(a.data, b.data, 128 * 128 * 4) == 0);
+    const int used = itm::END - itm::STICK;
+    for (int t = 0; t < used; ++t) {
+        int clear = 0, solid = 0, partial = 0;
+        for (int y = 0; y < 16; ++y)
+            for (int x = 0; x < 16; ++x) {
+                const unsigned char alpha = pixel(a, (t % 8) * 16 + x, (t / 8) * 16 + y)[3];
+                clear += alpha == 0 ? 1 : 0;
+                solid += alpha == 255 ? 1 : 0;
+                partial += alpha != 0 && alpha != 255 ? 1 : 0;
+            }
+        CHECK(clear > 0);
+        CHECK(solid > 0);
+        CHECK(partial == 0);
+    }
+    for (int s = 0; s < used; ++s)
+        for (int t = s + 1; t < used; ++t) {
+            bool same = true;
+            for (int y = 0; y < 16 && same; ++y)
+                same = std::memcmp(pixel(a, (s % 8) * 16, (s / 8) * 16 + y), pixel(a, (t % 8) * 16, (t / 8) * 16 + y),
+                                   16 * 4) == 0;
+            CHECK(!same);
+        }
+    const unsigned char* unused = pixel(a, 127, 127);
+    CHECK(unused[0] == 255 && unused[1] == 0 && unused[2] == 255);
+    // Tools of one kind share a shape and differ by tier color: the wooden and iron picks have
+    // their opaque pixels in exactly the same places.
+    const int wood = itm::PICK_WOOD - itm::STICK, iron = itm::PICK_IRON - itm::STICK;
+    for (int y = 0; y < 16; ++y)
+        for (int x = 0; x < 16; ++x)
+            CHECK((pixel(a, (wood % 8) * 16 + x, (wood / 8) * 16 + y)[3] == 0) ==
+                  (pixel(a, (iron % 8) * 16 + x, (iron / 8) * 16 + y)[3] == 0));
+    MemFree(a.data);
+    MemFree(b.data);
 }

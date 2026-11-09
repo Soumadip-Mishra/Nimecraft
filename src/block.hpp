@@ -2,6 +2,8 @@
 // Block ids are persisted in saves: append only, never renumber or reuse.
 #pragma once
 
+#include "items.hpp"
+
 #include <array>
 #include <cstdint>
 #include <string_view>
@@ -13,7 +15,8 @@ constexpr BlockId AIR = 0, GRASS = 1, DIRT = 2, STONE = 3, SAND = 4, LOG = 5, LE
                   DEEPSTONE = 8, WATER = 9, GRAVEL = 10, CLAY = 11, SNOW = 12, ICE = 13,
                   SANDSTONE = 14, CACTUS = 15, PINE_LOG = 16, PINE_LEAVES = 17, TALL_GRASS = 18,
                   FLOWER = 19, COAL_ORE = 20, COPPER_ORE = 21, TIN_ORE = 22, IRON_ORE = 23,
-                  SILVER_ORE = 24, QUARTZ = 25, TORCH = 26, LANTERN = 27, GLOWCAP = 28, COUNT = 29;
+                  SILVER_ORE = 24, QUARTZ = 25, TORCH = 26, LANTERN = 27, GLOWCAP = 28,
+                  WORKBENCH = 29, KILN = 30, CRATE = 31, GLASS = 32, COUNT = 33;
 }
 
 enum Face : uint8_t { PX, NX, PY, NY, PZ, NZ };
@@ -54,6 +57,17 @@ enum Tile : uint8_t {
     T_TORCH,
     T_LANTERN,
     T_GLOWCAP,
+    T_WORKBENCH_TOP,
+    T_WORKBENCH_SIDE,
+    T_KILN_TOP,
+    T_KILN_SIDE,
+    T_CRATE_TOP,
+    T_CRATE_SIDE,
+    T_GLASS,
+    T_CRACK_0,  // mining overlay stages, drawn over the targeted block (never on a block face)
+    T_CRACK_1,
+    T_CRACK_2,
+    T_CRACK_3,
     T_COUNT
 };
 
@@ -77,6 +91,15 @@ struct BlockDef {
     // Light a cell of this block takes away: 15 for every opaque block, LEAVES and PINE_LEAVES 1,
     // WATER and ICE 2, everything else 0.
     uint8_t opacity = 15;
+    // Mining (M4 Task 3, see mining.hpp): seconds = hardness * 1.5 by hand; `tool` speeds it up;
+    // a held tier below min_tier (with the right tool) slows it to hardness * 5 and drops nothing.
+    float hardness = 0;
+    ToolKind tool = ToolKind::None;
+    uint8_t min_tier = 0;
+    // Breaking drops drop_min..drop_max of `drop` (0 = nothing), with drop_chance percent.
+    ItemId drop = 0;
+    uint8_t drop_min = 1, drop_max = 1;
+    uint8_t drop_chance = 100;
 };
 
 const BlockDef& block_def(BlockId id);  // ids >= blk::COUNT return the AIR def

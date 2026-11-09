@@ -8,23 +8,31 @@
 
 #include "raylib.h"  // Vector3 only
 
+#include <cstdint>
+
 class World;
 
 constexpr float PLAYER_HALF_W = 0.3f, PLAYER_H = 1.8f, PLAYER_EYE = 1.62f, PLAYER_SPEED = 4.3f,
                 GRAVITY = 28.f, JUMP_VEL = 9.f, MAX_FALL = 50.f, MOUSE_SENS = 0.003f, REACH = 6.f;
 // In water: weaker gravity, a slow sink, swimming up while jump is held, slower walking.
 constexpr float WATER_GRAVITY = 6.f, MAX_SINK = 3.f, SWIM_VEL = 3.5f, WATER_SPEED = 0.6f;
+constexpr float FLY_SPEED = 10.f;  // Creative flying, horizontal and vertical
+
+// Persisted in world.meta as mode=survival|creative (M4 Task 6).
+enum class GameMode : uint8_t { Survival, Creative };
 
 struct Player {
     Vector3 pos;  // feet center
     Vector3 vel{};
     float yaw = 0, pitch = 0;
     bool on_ground = false;
+    bool flying = false;  // Creative only: no gravity, jump / descend move up / down
 };
 
 struct PlayerInput {
     float forward = 0, right = 0;
     bool jump = false;
+    bool descend = false;  // flying only
     float mouse_dx = 0, mouse_dy = 0;
 };
 
@@ -45,7 +53,8 @@ bool eye_in_water(const Player& p, const World& w);
 // 1/120 s, resolving collisions along X, then Y, then Z. If the player's column is not loaded,
 // only the look angles change. When in_water at the start of the update, walking speed is
 // x WATER_SPEED and jump does not jump; in each substep that starts in_water, vel.y becomes
-// SWIM_VEL while jump is held, else max(vel.y - WATER_GRAVITY * h, -MAX_SINK).
+// SWIM_VEL while jump is held, else max(vel.y - WATER_GRAVITY * h, -MAX_SINK). While flying, water
+// and gravity do not apply: walking runs at FLY_SPEED and vel.y = (jump - descend) * FLY_SPEED.
 void player_update(Player& p, const World& w, const PlayerInput& in, float dt);
 
 Vector3 player_eye(const Player& p);

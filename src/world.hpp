@@ -3,6 +3,7 @@
 #pragma once
 
 #include "block.hpp"
+#include "block_entities.hpp"
 #include "chunk.hpp"
 #include "coords.hpp"
 
@@ -31,8 +32,18 @@ public:
     // false if y is out of range or the column is unloaded. Setting the block already there
     // returns true and changes nothing. Otherwise marks the chunk modified and dirty, marks
     // dirty each loaded chunk whose mesh snapshot holds the block (the face, edge, and corner
-    // neighbors it borders), and updates light (relight_block).
+    // neighbors it borders), removes the cell's block entity, and updates light (relight_block).
     bool set(int x, int y, int z, BlockId b);
+
+    // Block entities live in their chunk (Chunk::entities), so they leave and return with
+    // remove_column / insert_column. nullptr when absent, unloaded, or y outside [0, 256).
+    BlockEntity* block_entity(BlockPos p);
+    const BlockEntity* block_entity(BlockPos p) const;
+    // Replaces the entity at p and marks the chunk modified; ignored when unloaded or y is out of
+    // range. The caller keeps the block and its entity in step (World::set removes stale ones).
+    void set_block_entity(BlockPos p, BlockEntity be);
+    void remove_block_entity(BlockPos p);  // marks the chunk modified when an entity was removed
+    std::vector<BlockPos> block_entity_positions() const;  // every loaded entity, unspecified order
     std::vector<ChunkPos> take_dirty();  // returns and clears, no duplicates, unspecified order
     void mark_dirty(ChunkPos p);         // adds p to the dirty set if its chunk is loaded
 

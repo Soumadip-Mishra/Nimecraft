@@ -47,8 +47,8 @@ std::optional<CliOptions> parse_cli(std::span<const char* const> args) {
     CliOptions o;
     for (std::size_t i = 0; i < args.size(); ++i) {
         const std::string_view flag = args[i];
-        if (flag == "--smoke") {
-            o.smoke = true;
+        if (flag == "--smoke" || flag == "--creative") {
+            (flag == "--smoke" ? o.smoke : o.creative) = true;
             continue;
         }
         if (i + 1 >= args.size()) return std::nullopt;  // every other flag takes a value
@@ -72,9 +72,10 @@ std::optional<CliOptions> parse_cli(std::span<const char* const> args) {
 }
 
 const char* cli_usage() {
-    return "usage: nimecraft [--world NAME] [--seed N] [--rd 4..16] [--smoke]\n"
+    return "usage: nimecraft [--world NAME] [--seed N] [--rd 4..16] [--creative] [--smoke]\n"
            "  --world NAME  world folder under saves/ (default: default)\n"
            "  --seed N      seed for a new world, 0..4294967295 (default: from the clock)\n"
            "  --rd N        render distance in columns, 4..16 (default: 8)\n"
+           "  --creative    start a new world in Creative mode (fly, unlimited blocks)\n"
            "  --smoke       walk a temporary world for 600 frames, print timing, exit\n";
 }

@@ -102,3 +102,15 @@ TEST(test_cli_world_name_is_single_path_part) {
     for (const char* good : {"My World 2", "con2", "console", "a.b", "-dash", "COM0"})
         CHECK(parse({"--world", good}).has_value());
 }
+
+// M4 Task 6 (user choice, 2026-11-08): --creative starts a new world in Creative mode.
+TEST(test_cli_creative_flag) {
+    auto o = parse({"--creative"});
+    CHECK(o.has_value() && o->creative);
+    auto d = parse({"--world", "a"});
+    CHECK(d.has_value() && !d->creative);
+    auto both = parse({"--creative", "--seed", "7", "--creative"});
+    CHECK(both.has_value() && both->creative && both->seed == 7u);
+    CHECK(!parse({"--creative", "yes"}).has_value());  // takes no value: "yes" is an unknown flag
+    CHECK(std::string_view(cli_usage()).find("--creative") != std::string_view::npos);
+}

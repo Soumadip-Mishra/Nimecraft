@@ -2,10 +2,12 @@
 #pragma once
 
 #include "block.hpp"
+#include "block_entities.hpp"
 #include "coords.hpp"
 
 #include <array>
 #include <cstdint>
+#include <map>
 #include <memory>
 
 struct Chunk {
@@ -16,6 +18,9 @@ struct Chunk {
     // Per cell, in Chunk::index order: high nibble sky light, low nibble block light. Not
     // persisted (recomputed when a column loads) and not counted as an edit by version.
     std::array<uint8_t, CHUNK * CHUNK * CHUNK> light{};
+    // Block entities by Chunk::index (M4 Task 5): kilns, crates, cairns. Persisted (region v2);
+    // ordered so saves come out the same every time.
+    std::map<uint16_t, BlockEntity> entities;
 
     // Local coordinates are in [0, CHUNK); the caller guarantees the range.
     static int index(int lx, int ly, int lz);  // lx + lz*16 + ly*256

@@ -17,6 +17,12 @@ struct ColumnPos {
     bool operator==(const ColumnPos&) const = default;
 };
 
+// One block in world coordinates.
+struct BlockPos {
+    int x, y, z;
+    bool operator==(const BlockPos&) const = default;
+};
+
 struct ChunkPosHash {
     std::size_t operator()(ChunkPos p) const noexcept;
 };

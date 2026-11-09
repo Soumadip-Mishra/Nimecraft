@@ -1,24 +1,29 @@
 #include "storage.hpp"
 
 #include "block.hpp"
+#include "block_entities.hpp"
+#include "items.hpp"
 
 #include <algorithm>
 #include <array>
+#include <bit>
 #include <charconv>
 #include <cmath>
 #include <cstddef>
 #include <fstream>
 #include <iterator>
+#include <span>
 #include <string>
 #include <string_view>
 #include <system_error>
+#include <variant>
 
 namespace fs = std::filesystem;
 
 namespace {
 
 constexpr std::array<uint8_t, 4> MAGIC = {'N', 'M', 'C', 'R'};
-constexpr uint32_t REGION_VERSION = 1;
+constexpr uint32_t REGION_VERSION = 2;  // written; every version from 1 up to it loads
 constexpr int REGION_COLUMNS = 32;  // a region is 32 x 32 columns
 constexpr std::size_t CHUNK_BLOCKS = CHUNK * CHUNK * CHUNK;
 constexpr std::size_t COLUMN_BLOCKS = SECTIONS * CHUNK_BLOCKS;
@@ -37,6 +42,7 @@ void put_u32(std::vector<uint8_t>& out, uint32_t v) {
 class Reader {
 public:
     explicit Reader(const std::vector<uint8_t>& b) : b_(b) {}
+    bool u8(uint32_t& v) { return read(1, v); }
     bool u16(uint32_t& v) { return read(2, v); }
     bool u32(uint32_t& v) { return read(4, v); }
     bool i32(int& v) {
@@ -52,7 +58,14 @@ public:
         at_ += n;
         return true;
     }
+    bool f32(float& v) {
+        uint32_t u = 0;
+        if (!read(4, u)) return false;
+        v = std::bit_cast<float>(u);
+        return true;
+    }
     bool done() const { return at_ == b_.size(); }
+    std::size_t left() const { return b_.size() - at_; }
 
 private:
     bool read(std::size_t n, uint32_t& v) {
@@ -114,26 +127,153 @@ std::optional<Column> decode(const std::vector<uint8_t>& bytes) {
     return col;
 }
 
-using ColumnMap = std::map<std::pair<int, int>, std::vector<uint8_t>>;
+// ---- Block entities (v2) ----
+// Section: u32 be_count, then per entity i32 x, y, z (world), u8 kind (BlockEntity index), payload.
+// A stack is u16 id, u8 count, u16 damage; an empty stack is written as 0, 0, 0.
+// Kiln: 4 stacks (in, in, fuel, out), f32 burn_left, burn_total, progress. Crate: 27 stacks.
+// Cairn: u32 n, n stacks.
 
-// The whole file must be well formed, or the region counts as corrupt.
+void put_stack(std::vector<uint8_t>& out, const ItemStack& st) {
+    const ItemStack e = st.empty() ? ItemStack{} : st;
+    put_u16(out, e.id);
+    out.push_back(e.count);
+    put_u16(out, e.damage);
+}
+
+void put_f32(std::vector<uint8_t>& out, float v) {
+    put_u32(out, std::bit_cast<uint32_t>(v));
+}
+
+std::vector<uint8_t> encode_entities(const Column& col, ColumnPos c) {
+    std::vector<uint8_t> out;
+    uint32_t count = 0;
+    put_u32(out, 0);  // patched below
+    for (std::size_t y = 0; y < col.size(); ++y) {
+        if (!col[y]) continue;
+        for (const auto& [i, be] : col[y]->entities) {
+            put_u32(out, static_cast<uint32_t>(c.x * CHUNK + i % CHUNK));
+            put_u32(out, static_cast<uint32_t>(static_cast<int>(y) * CHUNK + i / (CHUNK * CHUNK)));
+            put_u32(out, static_cast<uint32_t>(c.z * CHUNK + (i / CHUNK) % CHUNK));
+            out.push_back(static_cast<uint8_t>(be.index()));
+            if (const auto* k = std::get_if<KilnState>(&be)) {
+                for (const ItemStack& st : {k->in[0], k->in[1], k->fuel, k->out}) put_stack(out, st);
+                put_f32(out, k->burn_left);
+                put_f32(out, k->burn_total);
+                put_f32(out, k->progress);
+            } else if (const auto* cr = std::get_if<CrateState>(&be)) {
+                for (const ItemStack& st : cr->slots) put_stack(out, st);
+            } else {
+                const auto& items = std::get<CairnState>(be).items;
+                put_u32(out, static_cast<uint32_t>(items.size()));
+                for (const ItemStack& st : items) put_stack(out, st);
+            }
+            ++count;
+        }
+    }
+    for (int k = 0; k < 4; ++k) out[static_cast<std::size_t>(k)] = static_cast<uint8_t>((count >> (8 * k)) & 0xFF);
+    return out;
+}
+
+// A stack must name a real item, fit its max_stack, and carry damage only below a tool's
+// durability; count 0 reads as an empty stack.
+bool read_stack(Reader& r, ItemStack& st) {
+    uint32_t id = 0, count = 0, damage = 0;
+    if (!r.u16(id) || !r.u8(count) || !r.u16(damage)) return false;
+    if (count == 0) {
+        st = ItemStack{};
+        return true;
+    }
+    const ItemDef& d = item_def(static_cast<ItemId>(id));
+    if (d.max_stack == 0 || count > d.max_stack) return false;
+    if (d.durability == 0 ? damage != 0 : damage >= d.durability) return false;
+    st = ItemStack{static_cast<ItemId>(id), static_cast<uint8_t>(count), static_cast<uint16_t>(damage)};
+    return true;
+}
+
+bool read_time(Reader& r, float& v) {
+    return r.f32(v) && std::isfinite(v) && v >= 0.f;
+}
+
+constexpr std::size_t ENTITY_HEAD = 13, STACK_BYTES = 5;
+
+// Reads a whole entity section into col (chunks already allocated); false on any error.
+bool decode_entities(Reader& r, ColumnPos c, Column* col) {
+    uint32_t count = 0;
+    if (!r.u32(count)) return false;
+    if (count > r.left() / (ENTITY_HEAD + 4)) return false;  // every entity takes at least 17 bytes
+    for (uint32_t e = 0; e < count; ++e) {
+        int x = 0, y = 0, z = 0;
+        uint32_t kind = 0;
+        if (!r.i32(x) || !r.i32(y) || !r.i32(z) || !r.u8(kind)) return false;
+        if (floor_div(x, CHUNK) != c.x || floor_div(z, CHUNK) != c.z || y < 0 || y >= WORLD_HEIGHT) return false;
+        BlockEntity be;
+        if (kind == 0) {
+            KilnState k;
+            for (ItemStack* st : {&k.in[0], &k.in[1], &k.fuel, &k.out})
+                if (!read_stack(r, *st)) return false;
+            if (!read_time(r, k.burn_left) || !read_time(r, k.burn_total) || !read_time(r, k.progress)) return false;
+            be = k;
+        } else if (kind == 1) {
+            CrateState cr;
+            for (ItemStack& st : cr.slots)
+                if (!read_stack(r, st)) return false;
+            be = cr;
+        } else if (kind == 2) {
+            uint32_t n = 0;
+            if (!r.u32(n) || n > r.left() / STACK_BYTES) return false;
+            CairnState cairn;
+            cairn.items.resize(n);
+            for (ItemStack& st : cairn.items)
+                if (!read_stack(r, st)) return false;
+            be = std::move(cairn);
+        } else {
+            return false;
+        }
+        const auto i = static_cast<uint16_t>(Chunk::index(floor_mod(x, CHUNK), y % CHUNK, floor_mod(z, CHUNK)));
+        if (col == nullptr) continue;  // validating only
+        auto& slot = (*col)[static_cast<std::size_t>(y / CHUNK)]->entities;
+        if (!slot.emplace(i, std::move(be)).second) return false;  // two entities in one cell
+    }
+    return true;
+}
+
+std::optional<Column> decode_column(const RegionColumn& d, ColumnPos c) {
+    std::optional<Column> col = decode(d.blocks);
+    if (!col) return std::nullopt;
+    Reader r(d.entities);
+    if (!decode_entities(r, c, &*col) || !r.done()) return std::nullopt;
+    return col;
+}
+
+using ColumnMap = std::map<std::pair<int, int>, RegionColumn>;
+
+// The whole file must be well formed, or the region counts as corrupt. Version 1 files have no
+// entity sections; they load as columns without block entities.
 std::optional<ColumnMap> parse_region(const std::vector<uint8_t>& bytes, std::pair<int, int> region) {
     Reader r(bytes);
     std::vector<uint8_t> magic;
     uint32_t version = 0, count = 0;
     if (!r.take(MAGIC.size(), magic) || !std::equal(magic.begin(), magic.end(), MAGIC.begin()))
         return std::nullopt;
-    if (!r.u32(version) || version != REGION_VERSION || !r.u32(count)) return std::nullopt;
+    if (!r.u32(version) || version < 1 || version > REGION_VERSION || !r.u32(count)) return std::nullopt;
     ColumnMap columns;
     for (uint32_t e = 0; e < count; ++e) {
         int cx = 0, cz = 0;
         uint32_t len = 0;
-        std::vector<uint8_t> data;
-        if (!r.i32(cx) || !r.i32(cz) || !r.u32(len) || !r.take(len, data)) return std::nullopt;
+        RegionColumn data;
+        if (!r.i32(cx) || !r.i32(cz) || !r.u32(len) || !r.take(len, data.blocks)) return std::nullopt;
         if (floor_div(cx, REGION_COLUMNS) != region.first ||
             floor_div(cz, REGION_COLUMNS) != region.second)
             return std::nullopt;
-        if (!decode(data)) return std::nullopt;
+        if (version >= 2) {
+            // Validate the entity section in place, then keep exactly its bytes.
+            Reader probe = r;
+            if (!decode_entities(probe, ColumnPos{cx, cz}, nullptr)) return std::nullopt;
+            if (!r.take(r.left() - probe.left(), data.entities)) return std::nullopt;
+        } else {
+            put_u32(data.entities, 0);
+        }
+        if (!decode_column(data, ColumnPos{cx, cz})) return std::nullopt;  // also catches duplicate cells
         if (!columns.emplace(std::make_pair(cx, cz), std::move(data)).second) return std::nullopt;
     }
     if (!r.done()) return std::nullopt;
@@ -210,7 +350,7 @@ RegionStore::RegionStore(fs::path dir) : dir_(std::move(dir)) {
 }
 
 std::optional<Column> RegionStore::load_column(ColumnPos c) {
-    std::vector<uint8_t> bytes;
+    RegionColumn bytes;
     {
         std::lock_guard<std::mutex> lock(mutex_);
         const Region& reg =
@@ -219,11 +359,11 @@ std::optional<Column> RegionStore::load_column(ColumnPos c) {
         if (it == reg.columns.end()) return std::nullopt;
         bytes = it->second;
     }
-    return decode(bytes);  // validated when the region was read; decoding outside the lock
+    return decode_column(bytes, c);  // validated when the region was read; decoding outside the lock
 }
 
 void RegionStore::save_column(ColumnPos c, const Column& col) {
-    std::vector<uint8_t> bytes = encode(col);
+    RegionColumn bytes{encode(col), encode_entities(col, c)};
     std::lock_guard<std::mutex> lock(mutex_);
     Region& reg = region_locked(Key{floor_div(c.x, REGION_COLUMNS), floor_div(c.z, REGION_COLUMNS)});
     reg.columns.insert_or_assign(Key{c.x, c.z}, std::move(bytes));
@@ -241,8 +381,9 @@ bool RegionStore::flush() {
         for (const auto& [pos, data] : reg.columns) {
             put_u32(out, static_cast<uint32_t>(pos.first));
             put_u32(out, static_cast<uint32_t>(pos.second));
-            put_u32(out, static_cast<uint32_t>(data.size()));
-            out.insert(out.end(), data.begin(), data.end());
+            put_u32(out, static_cast<uint32_t>(data.blocks.size()));
+            out.insert(out.end(), data.blocks.begin(), data.blocks.end());
+            out.insert(out.end(), data.entities.begin(), data.entities.end());
         }
         if (write_file_atomic(region_path(key), out)) {
             reg.dirty = false;
@@ -267,11 +408,59 @@ fs::path RegionStore::region_path(Key r) const {
     return dir_ / ("r." + number_text(r.first) + "." + number_text(r.second) + ".bin");
 }
 
+namespace {
+
+std::string stack_list(std::span<const ItemStack> slots) {
+    std::string out;
+    for (std::size_t i = 0; i < slots.size(); ++i) {
+        const ItemStack e = slots[i].empty() ? ItemStack{} : slots[i];
+        if (i > 0) out += ',';
+        out += number_text(e.id) + ':' + number_text(static_cast<int>(e.count)) + ':' + number_text(e.damage);
+    }
+    return out;
+}
+
+// One id:count:damage entry; nullopt when it is not a valid stack for `kind`.
+std::optional<ItemStack> parse_stack(std::string_view e, ArmorSlot armor) {
+    const std::size_t a = e.find(':');
+    const std::size_t b = a == std::string_view::npos ? a : e.find(':', a + 1);
+    if (b == std::string_view::npos) return std::nullopt;
+    const auto id = parse_u32(e.substr(0, a)), count = parse_u32(e.substr(a + 1, b - a - 1)),
+               damage = parse_u32(e.substr(b + 1));
+    if (!id || !count || !damage || *id > 0xFFFF) return std::nullopt;
+    const ItemDef& d = item_def(static_cast<ItemId>(*id));
+    if (*count == 0 || d.max_stack == 0 || *count > d.max_stack) return std::nullopt;
+    if (d.durability == 0 ? *damage != 0 : *damage >= d.durability) return std::nullopt;
+    if (armor != ArmorSlot::None && d.armor != armor) return std::nullopt;
+    return ItemStack{static_cast<ItemId>(*id), static_cast<uint8_t>(*count), static_cast<uint16_t>(*damage)};
+}
+
+// Fills `slots` from a comma-separated list; invalid entries and missing ones stay empty.
+void parse_stack_list(std::string_view v, std::span<ItemStack> slots, bool armor) {
+    constexpr ArmorSlot ARMOR_ORDER[4] = {ArmorSlot::Head, ArmorSlot::Chest, ArmorSlot::Legs, ArmorSlot::Feet};
+    for (ItemStack& s : slots) s = ItemStack{};
+    std::size_t i = 0;
+    while (i < slots.size()) {
+        const std::size_t comma = v.find(',');
+        const std::string_view entry = v.substr(0, comma);
+        const std::optional<ItemStack> st = parse_stack(entry, armor ? ARMOR_ORDER[i] : ArmorSlot::None);
+        if (st) slots[i] = *st;
+        ++i;
+        if (comma == std::string_view::npos) break;
+        v.remove_prefix(comma + 1);
+    }
+}
+
+}  // namespace
+
 bool save_meta(const fs::path& file, const WorldMeta& m) {
     const std::string text = "version=1\nseed=" + number_text(m.seed) + "\npx=" + number_text(m.px) +
                              "\npy=" + number_text(m.py) + "\npz=" + number_text(m.pz) +
                              "\nyaw=" + number_text(m.yaw) + "\npitch=" + number_text(m.pitch) +
-                             "\ntime=" + number_text(m.time) + "\n";
+                             "\ntime=" + number_text(m.time) +
+                             "\nmode=" + (m.mode == GameMode::Creative ? "creative" : "survival") +
+                             "\ninv=" + stack_list(m.inv.slots) + "\narmor=" + stack_list(m.inv.armor) +
+                             "\nsel=" + number_text(m.inv.selected) + "\n";
     return write_file_atomic(file, std::vector<uint8_t>(text.begin(), text.end()));
 }
 
@@ -283,6 +472,8 @@ std::optional<WorldMeta> load_meta(const fs::path& file) {
     std::optional<uint32_t> version, seed;
     std::optional<float> px, py, pz, yaw, pitch;
     double time = DEFAULT_TIME;
+    GameMode mode = GameMode::Survival;
+    Inventory inv;
     // Skip a UTF-8 byte order mark, which some Windows editors add when saving.
     std::size_t start = text.starts_with("\xEF\xBB\xBF") ? 3 : 0;
     while (start < text.size()) {
@@ -306,10 +497,21 @@ std::optional<WorldMeta> load_meta(const fs::path& file) {
             // Optional: a bad value falls back to the default instead of rejecting the world.
             const std::optional<double> t = parse_finite<double>(value);
             time = t && *t >= 0 ? *t : DEFAULT_TIME;
+        } else if (key == "mode") {
+            mode = value == "creative" ? GameMode::Creative : GameMode::Survival;
+        } else if (key == "inv") {
+            parse_stack_list(value, inv.slots, false);
+        } else if (key == "armor") {
+            parse_stack_list(value, inv.armor, true);
+        } else if (key == "sel") {
+            const std::optional<uint32_t> sel = parse_u32(value);
+            inv.selected = sel && *sel <= 8 ? static_cast<int>(*sel) : 0;
         }  // unknown keys are ignored
     }
     if (version != 1u || !seed || !px || !py || !pz || !yaw || !pitch) return std::nullopt;
     WorldMeta m{*seed, *px, *py, *pz, *yaw, *pitch};
     m.time = time;
+    m.mode = mode;
+    m.inv = inv;
     return m;
 }

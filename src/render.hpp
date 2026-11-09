@@ -3,6 +3,7 @@
 #pragma once
 
 #include "coords.hpp"
+#include "items.hpp"
 #include "mesher.hpp"
 
 #include "raylib.h"
@@ -14,6 +15,11 @@
 // 128x128, deterministic pixel art for each Tile. Cutout tiles (leaves, plants) use alpha 0 or
 // 255 only; Translucent tiles (water, ice) are partly transparent everywhere; all others opaque.
 Image generate_atlas();
+
+// 128x128 icons for the non-block items, one 16 px cell per item at ItemDef::icon (id - STICK):
+// opaque pixels on a clear background. Tools are one shape per kind tinted by tier; unused cells
+// are magenta. Deterministic.
+Image generate_item_atlas();
 
 // Chunks ordered farthest first by the distance from eye to each chunk's centre (p * 16 + 8),
 // ties broken by ChunkPos (x, then y, then z, ascending), so the order never depends on the input.
@@ -51,6 +57,15 @@ public:
     // lights each texel by max(sky * daylight, block). Returns chunks drawn after culling.
     int draw(const Camera3D& cam, float aspect);
     void draw_highlight(int x, int y, int z);  // DrawCubeWires 1.002 size, BLACK
+    // Crack overlay T_CRACK_0 + stage (0..3) on the six faces of block (x, y, z), slightly outside it.
+    void draw_crack(int x, int y, int z, int stage);
+    // A dropped item: a billboard of its icon (block atlas tile or item icon), size in blocks.
+    void draw_item(const Camera3D& cam, ItemId id, Vector3 pos, float size, Color tint);
+    // The atlases for 2D icons (ui_draw); valid between init and shutdown.
+    Texture2D block_atlas() const;
+    Texture2D item_atlas() const;
+    // Source rectangle (in pixels) of an item's icon in block_atlas() (block items) or item_atlas().
+    static Rectangle icon_rect(ItemId id);
     void shutdown();
 
 private:
@@ -58,6 +73,7 @@ private:
     using ChunkGpu = std::array<std::vector<Mesh>, 3>;
 
     Material material_{};
+    Texture2D items_tex_{};
     bool ready_ = false;
     int loc_cam_ = -1, loc_fog_color_ = -1, loc_fog_start_ = -1, loc_fog_end_ = -1, loc_cutoff_ = -1,
         loc_daylight_ = -1;

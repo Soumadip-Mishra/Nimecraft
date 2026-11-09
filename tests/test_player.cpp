@@ -531,3 +531,47 @@ TEST(test_regress_spawn_on_water) {
     CHECK(p.pos.y == 65.f);
     CHECK(p.pos.x == 0.5f && p.pos.z == 0.5f);
 }
+
+// M4 Task 6: Creative flying - no gravity; jump rises and descend sinks at FLY_SPEED (10), walking
+// runs at FLY_SPEED, and blocks still stop the player.
+TEST(test_player_flying) {
+    World w = flat_world();
+    Player p = at(8.5f, 80.f, 8.5f);
+    p.flying = true;
+    run(p, w, PlayerInput{}, 60);
+    CHECK_NEAR(p.pos.y, 80.0, 1e-4);  // hovers
+    PlayerInput up;
+    up.jump = true;
+    run(p, w, up, 60);
+    CHECK_NEAR(p.pos.y, 90.0, 0.01);
+    PlayerInput down;
+    down.descend = true;
+    run(p, w, down, 180);  // 30 blocks of sinking, but the floor at y = 70 stops it
+    CHECK_NEAR(p.pos.y, 70.0, 1e-3);
+    CHECK(p.on_ground);
+
+    Player q = at(0.5f, 75.f, 0.5f);
+    q.flying = true;
+    PlayerInput fwd;
+    fwd.forward = 1.f;
+    run(q, w, fwd, 60);
+    CHECK_NEAR(q.pos.x, 10.5, 0.01);
+    CHECK_NEAR(q.pos.y, 75.0, 1e-4);
+    PlayerInput both;  // jump and descend together cancel
+    both.jump = true;
+    both.descend = true;
+    run(q, w, both, 30);
+    CHECK_NEAR(q.pos.y, 75.0, 1e-4);
+
+    // Flying ignores water: no sinking and full speed.
+    World pool = pool_world(63, 70);
+    Player s = at(8.5f, 65.f, 8.5f);
+    s.flying = true;
+    run(s, pool, fwd, 30);
+    CHECK_NEAR(s.pos.y, 65.0, 1e-4);
+    CHECK_NEAR(s.pos.x, 13.5, 0.01);
+    // Walking (not flying) ignores descend.
+    Player g = at(8.5f, 70.f, 8.5f);
+    run(g, w, down, 30);
+    CHECK_NEAR(g.pos.y, 70.0, 1e-3);
+}
