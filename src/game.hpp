@@ -1,11 +1,13 @@
 // One running game: world load and save, the per-frame loop, input, mining and placing, item
-// entities, kilns, the inventory, crafting, kiln, and crate screens, Creative mode, and the HUD.
+// entities, kilns, the inventory, crafting, kiln, and crate screens, Creative mode, survival
+// (vitals, eating, fall damage, death, grave cairns, bedroll respawn, sleeping), and the HUD.
 // Device module (window, input, clock): decisions live in the tested logic modules; this class only
 // wires them to the window. Covered by --smoke and the Manual checks.
 #pragma once
 
 #include "chunk_manager.hpp"
 #include "cli.hpp"
+#include "combat.hpp"
 #include "inventory.hpp"
 #include "item_entities.hpp"
 #include "jobs.hpp"
@@ -15,6 +17,7 @@
 #include "storage.hpp"
 #include "ui_draw.hpp"
 #include "ui_logic.hpp"
+#include "vitals.hpp"
 #include "world.hpp"
 #include "world_time.hpp"
 
@@ -22,6 +25,7 @@
 #include <filesystem>
 #include <memory>
 #include <optional>
+#include <string>
 #include <vector>
 
 class Game {
@@ -49,6 +53,12 @@ private:
     };
 
     void handle_input(float dt);
+    void update_survival(const PlayerInput& in, Vector3 before, bool was_on_ground, float dt);
+    void update_eating(float dt);
+    void die();
+    void start_respawn();
+    void update_respawn();
+    void toast(const char* text);
     void update_mining(const RayHit& hit, float dt);
     void use_block(const RayHit& hit);
     void break_block(BlockPos p, bool survival_drops);
@@ -78,6 +88,23 @@ private:
     GameMode mode_ = GameMode::Survival;
     Inventory inv_;
     ItemEntities items_;
+
+    // Survival.
+    Vitals vitals_;
+    DamageState damage_;
+    FallTracker fall_;
+    EatState eating_;
+    int mined_since_tick_ = 0;
+    std::optional<BlockPos> bedroll_;  // the respawn point set by using a bedroll
+    bool dead_ = false;                // the death screen is up
+    bool respawning_ = false;          // waiting for the respawn columns to load
+    bool respawn_to_origin_ = false;   // no usable bedroll: respawn at spawn_player's position
+    ColumnPos respawn_col_{0, 0};      // streamed while respawning_
+    std::string death_note_;           // where the last death's items went ("" when unknown)
+    float hurt_flash_ = 0.f;           // seconds left of the red flash
+    float last_health_ = MAX_HEALTH;
+    std::string toast_;
+    float toast_left_ = 0.f;
 
     // Screens.
     Screen screen_ = Screen::None;

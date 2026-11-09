@@ -560,11 +560,13 @@ TEST(test_meta_text_format) {
     const std::vector<uint8_t> bytes = read_bytes(tmp.path() / "world.meta");
     const std::string text(bytes.begin(), bytes.end());
     // M3 Task 4 appends the optional time key (default 6000); M4 Task 6 the mode, an empty
-    // inventory (36 entries), empty armor (4), and the selected slot.
+    // inventory (36 entries), empty armor (4), and the selected slot; M5 Task 3 full vitals (and
+    // no spawn line while there is no bedroll).
     std::string empty_inv;
     for (int i = 0; i < 36; ++i) empty_inv += i == 0 ? "0:0:0" : ",0:0:0";
     CHECK(text == "version=1\nseed=7\npx=0.5\npy=70\npz=-2.25\nyaw=1\npitch=-0.5\ntime=6000\n"
-                  "mode=survival\ninv=" + empty_inv + "\narmor=0:0:0,0:0:0,0:0:0,0:0:0\nsel=0\n");
+                  "mode=survival\ninv=" + empty_inv + "\narmor=0:0:0,0:0:0,0:0:0,0:0:0\nsel=0\n"
+                  "vitals=20,20,5,10,0,0,0\n");
 }
 
 TEST(test_meta_save_failure_reported) {

@@ -4,6 +4,7 @@
 
 #include "inventory.hpp"
 #include "items.hpp"
+#include "vitals.hpp"
 
 #include "raylib.h"
 
@@ -28,3 +29,17 @@ void draw_tooltip(const std::string& text, Vector2 at);
 void draw_hotbar(const UiTextures& t, const Inventory& inv);
 // The item's display name, with "uses left/durability" for tools.
 std::string item_label(const ItemStack& s);
+
+// Survival HUD (M5) above the hotbar: 10 hearts (left) and 10 hunger icons (right) in half steps,
+// the armor bar above the hearts when armor > 0, and air bubbles above the hunger icons when
+// show_air.
+void draw_survival_hud(const Vitals& v, int armor, bool show_air);
+// A red full-screen flash; strength 0..1 (clamped).
+void draw_hurt_flash(float strength);
+// The death screen's "Respawn" button, centered.
+Rectangle death_button_rect();
+// Dims the screen, "You died", a note under it (skipped when empty), and the Respawn button
+// (highlighted when hovered).
+void draw_death_screen(const std::string& note, bool hovered);
+// A short message centered above the hotbar.
+void draw_toast(const std::string& text);

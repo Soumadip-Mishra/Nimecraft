@@ -265,6 +265,10 @@ TEST(test_recipes_table_amounts) {
     CHECK(needs(find(itm::HIDE_CHEST, Station::Workbench), itm::HIDE) == 8);
     CHECK(needs(find(itm::IRON_LEGS, Station::Workbench), itm::IRON_INGOT) == 7);
     CHECK(needs(find(itm::IRON_BOOTS, Station::Workbench), itm::IRON_INGOT) == 4);
+    // M5: the bedroll (the inputs the user approved on 2026-11-08).
+    const Recipe* bedroll = find(blk::BEDROLL, Station::Workbench);
+    CHECK(needs(bedroll, itm::WOOL) == 3 && needs(bedroll, blk::PLANKS) == 3 && bedroll->output.count == 1);
+    CHECK(bedroll->inputs.size() == 2);
     // Every output of these recipes is 1 except planks, sticks, and torches.
     CHECK(find(itm::PICK_IRON, Station::Workbench)->output.count == 1);
 }

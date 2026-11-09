@@ -20,8 +20,8 @@ struct Recipe {
     Station station;
 };
 
-// Every recipe: hand recipes (Station::None) first, then workbench ones. The BEDROLL recipe
-// (3 WOOL + 3 PLANKS) arrives with its block in M5.
+// Every recipe: hand recipes (Station::None) first, then workbench ones, the last being BEDROLL
+// (3 WOOL + 3 PLANKS, M5).
 const std::vector<Recipe>& recipes();
 
 using StationSet = std::bitset<3>;  // indexed by Station; the None bit is never set

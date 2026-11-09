@@ -24,8 +24,8 @@ TEST(test_block_ids) {
     CHECK(blk::LEAVES == 6);
     CHECK(blk::PLANKS == 7);
     CHECK(blk::DEEPSTONE == 8);
-    CHECK(blk::COUNT == 33);  // M4 appended WORKBENCH, KILN, CRATE, GLASS
-    CHECK(T_COUNT == 45);     // M4: 7 station and glass tiles, 4 crack stages
+    CHECK(blk::COUNT == 35);  // M4 appended WORKBENCH, KILN, CRATE, GLASS; M5 BEDROLL, GRAVE_CAIRN
+    CHECK(T_COUNT == 49);     // M4: 7 station and glass tiles, 4 crack stages; M5: 4 bedroll and cairn tiles
     CHECK(PX == 0 && NX == 1 && PY == 2 && NY == 3 && PZ == 4 && NZ == 5);
 }
 
@@ -63,7 +63,7 @@ TEST(test_block_ids_m4) {
     CHECK(blk::KILN == 30);
     CHECK(blk::CRATE == 31);
     CHECK(blk::GLASS == 32);
-    CHECK(blk::COUNT == 33);
+    CHECK(blk::COUNT == 35);
 }
 
 // M2 Task 1: LEAVES and PINE_LEAVES are Cutout, WATER and ICE Translucent, TALL_GRASS and FLOWER
@@ -180,7 +180,7 @@ TEST(test_block_def_id_boundary) {
     CHECK(&block_def(blk::COUNT) == &block_def(blk::AIR));
     CHECK(&block_def(999) == &block_def(blk::AIR));
     CHECK(&block_def(65535) == &block_def(blk::AIR));
-    CHECK(&block_def(blk::COUNT - 1) == &block_def(blk::GLASS));
+    CHECK(&block_def(blk::COUNT - 1) == &block_def(blk::GRAVE_CAIRN));
     CHECK(&block_def(blk::GLASS) != &block_def(blk::AIR));
     CHECK(block_def(blk::COUNT - 1).solid);
 }
@@ -252,4 +252,26 @@ TEST(test_block_defs_m4_tiles) {
     CHECK(block_def(blk::GLASS).opacity == 0);
     CHECK(block_def(blk::KILN).opacity == 15);
     CHECK(T_CRACK_0 + 1 == T_CRACK_1 && T_CRACK_1 + 1 == T_CRACK_2 && T_CRACK_2 + 1 == T_CRACK_3);
+}
+
+// M5: BEDROLL and GRAVE_CAIRN are solid, opaque, breakable cubes with their own tiles. The bedroll
+// drops itself; the cairn drops nothing itself (its stored items drop instead) and breaks by hand.
+TEST(test_block_defs_m5) {
+    const BlockDef& bed = block_def(blk::BEDROLL);
+    CHECK(bed.name == "Bedroll");
+    CHECK(bed.solid && bed.opaque && bed.breakable);
+    CHECK(bed.tiles[PY] == T_BEDROLL_TOP);
+    CHECK(bed.tiles[NY] == T_PLANKS);
+    CHECK(bed.tiles[PX] == T_BEDROLL_SIDE && bed.tiles[NZ] == T_BEDROLL_SIDE);
+    CHECK(bed.drop == blk::BEDROLL);
+    CHECK(bed.hardness == 0.4f && bed.tool == ToolKind::None && bed.min_tier == 0);
+    const BlockDef& cairn = block_def(blk::GRAVE_CAIRN);
+    CHECK(cairn.name == "Grave Cairn");
+    CHECK(cairn.solid && cairn.opaque && cairn.breakable);
+    CHECK(cairn.tiles[PY] == T_CAIRN_TOP && cairn.tiles[NY] == T_CAIRN_TOP);
+    CHECK(cairn.tiles[PX] == T_CAIRN_SIDE && cairn.tiles[PZ] == T_CAIRN_SIDE);
+    CHECK(cairn.drop == 0);
+    CHECK(cairn.hardness == 0.5f && cairn.tool == ToolKind::None && cairn.min_tier == 0);
+    CHECK(cairn.opacity == 15 && bed.opacity == 15);
+    CHECK(cairn.emission == 0 && bed.emission == 0);
 }

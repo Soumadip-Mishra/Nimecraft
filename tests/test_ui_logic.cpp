@@ -6,6 +6,7 @@
 
 #include <algorithm>
 #include <array>
+#include <limits>
 #include <span>
 #include <vector>
 
@@ -194,9 +195,12 @@ TEST(test_double_tap) {
 
 TEST(test_creative_palette) {
     const std::vector<ItemId> p = creative_palette();
-    CHECK(p.size() == static_cast<std::size_t>(blk::COUNT - 2 + (itm::END - itm::STICK)));
+    // Every block but AIR, WATER, and GRAVE_CAIRN (only made by dying), then every other item.
+    CHECK(p.size() == static_cast<std::size_t>(blk::COUNT - 3 + (itm::END - itm::STICK)));
     CHECK(std::find(p.begin(), p.end(), blk::AIR) == p.end());
     CHECK(std::find(p.begin(), p.end(), blk::WATER) == p.end());
+    CHECK(std::find(p.begin(), p.end(), blk::GRAVE_CAIRN) == p.end());
+    CHECK(std::find(p.begin(), p.end(), blk::BEDROLL) != p.end());
     CHECK(std::find(p.begin(), p.end(), blk::GLASS) != p.end());
     CHECK(std::find(p.begin(), p.end(), itm::IRON_BOOTS) != p.end());
     for (ItemId id : p) CHECK(item_def(id).max_stack > 0);
@@ -227,4 +231,25 @@ TEST(test_clamp_scroll) {
     CHECK(clamp_scroll(-4, 20, 8) == 0);
     CHECK(clamp_scroll(5, 6, 8) == 0);  // everything fits
     CHECK(clamp_scroll(3, 0, 8) == 0);
+}
+
+// M5 Task 4: a 10-icon bar for a 0..20 value, in half steps. An icon is full at value >= 2i + 2 and
+// half above 2i, so any health left shows at least half an icon.
+TEST(test_icon_fill) {
+    for (int i = 0; i < 10; ++i) {
+        CHECK(icon_fill(20.f, i) == IconFill::Full);
+        CHECK(icon_fill(0.f, i) == IconFill::Empty);
+    }
+    CHECK(icon_fill(19.5f, 8) == IconFill::Full);
+    CHECK(icon_fill(19.5f, 9) == IconFill::Half);
+    CHECK(icon_fill(7.f, 2) == IconFill::Full);
+    CHECK(icon_fill(7.f, 3) == IconFill::Half);
+    CHECK(icon_fill(7.f, 4) == IconFill::Empty);
+    CHECK(icon_fill(6.f, 2) == IconFill::Full);
+    CHECK(icon_fill(6.f, 3) == IconFill::Empty);
+    CHECK(icon_fill(0.3f, 0) == IconFill::Half);
+    CHECK(icon_fill(0.3f, 1) == IconFill::Empty);
+    CHECK(icon_fill(25.f, 9) == IconFill::Full);
+    CHECK(icon_fill(-1.f, 0) == IconFill::Empty);
+    CHECK(icon_fill(std::numeric_limits<float>::quiet_NaN(), 0) == IconFill::Empty);
 }

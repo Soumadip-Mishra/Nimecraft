@@ -113,7 +113,8 @@ constexpr Rgb GRASS{96, 158, 56}, DIRT{128, 92, 62}, STONE{122, 124, 128}, SAND{
               COAL{38, 38, 42}, COPPER{198, 112, 62}, TIN{190, 196, 204}, IRON{206, 164, 132},
               SILVER{232, 238, 246}, FLAME{238, 136, 40}, FLAME_CORE{255, 240, 170},
               IRON_FRAME{58, 58, 64}, GLOW{246, 186, 92}, STEM{214, 210, 190}, GLOWCAP_TEAL{64, 196, 180},
-              SPOT{200, 255, 240}, KILN_BRICK{150, 84, 60}, CRATE_WOOD{150, 112, 70}, GLASS_TINT{196, 226, 236};
+              SPOT{200, 255, 240}, KILN_BRICK{150, 84, 60}, CRATE_WOOD{150, 112, 70}, GLASS_TINT{196, 226, 236},
+              BLANKET{70, 104, 150}, PILLOW{226, 220, 200}, MOSS{84, 120, 60};
 constexpr Rgb CLEAR{0, 0, 0, 0};
 constexpr int WATER_ALPHA = 170, ICE_ALPHA = 200, GLASS_ALPHA = 60, GLASS_RIM_ALPHA = 170, GLASS_GLINT_ALPHA = 200;
 
@@ -336,6 +337,35 @@ Rgb tile_pixel(int t, int x, int y) {
         const bool chips = stage >= 2 && pixel_hash(x, y, 77) % (stage == 2 ? 11u : 6u) == 0;
         if (diag || jag || chips) return Rgb{24, 22, 20};
         return CLEAR;
+    }
+    case T_BEDROLL_TOP: {
+        // A rolled-out wool blanket with a pillow band at one end and a stitched border.
+        if (y <= 3) return noisy(x == 0 || x == 15 ? shade(PILLOW, 80) : PILLOW, x, y, salt, 4);
+        if (x == 0 || x == 15 || y == 15) return noisy(shade(BLANKET, 60), x, y, salt, 5);
+        if (x == 2 || x == 13) return noisy(shade(BLANKET, 82), x, y, salt, 5);
+        return noisy((x + y) % 6 == 0 ? shade(BLANKET, 90) : BLANKET, x, y, salt, 6);
+    }
+    case T_BEDROLL_SIDE: {
+        // Blanket over a plank base, with the rolled edge as a lighter stripe.
+        if (y >= 10) return noisy(y == 10 ? shade(PLANK, 70) : PLANK, x, y, salt, 6);
+        if (y <= 1) return noisy(shade(BLANKET, 116), x, y, salt, 4);
+        return noisy(y % 3 == 0 ? shade(BLANKET, 84) : BLANKET, x, y, salt, 6);
+    }
+    case T_CAIRN_TOP: {
+        // Stacked round stones seen from above: a ring of rocks around a capstone.
+        const int dx = 2 * x - 15, dy = 2 * y - 15, r2 = dx * dx + dy * dy;  // r2 in 2-px units
+        if (r2 <= 40) return noisy(shade(STONE, 116), x, y, salt, 6);
+        if (r2 <= 56) return noisy(shade(STONE, 58), x, y, salt, 4);
+        const bool gap = pixel_hash(x / 3, y / 3, salt + 5) % 5 == 0;
+        return noisy(gap ? shade(DIRT, 70) : shade(STONE, 96), x, y, salt, 9);
+    }
+    case T_CAIRN_SIDE: {
+        // Courses of rough stones with dark joints, a moss fleck here and there.
+        const int course = y / 4;
+        const bool joint = y % 4 == 3 || (x + course * 3) % 6 == 5;
+        if (joint) return noisy(shade(STONE, 52), x, y, salt, 4);
+        if (pixel_hash(x, y, salt + 9) % 13 == 0) return noisy(MOSS, x, y, salt, 6);
+        return noisy(course % 2 == 0 ? shade(STONE, 104) : shade(STONE, 92), x, y, salt, 8);
     }
     default: return Rgb{255, 0, 255};  // unused atlas cell
     }

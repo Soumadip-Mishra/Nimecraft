@@ -16,7 +16,8 @@ constexpr BlockId AIR = 0, GRASS = 1, DIRT = 2, STONE = 3, SAND = 4, LOG = 5, LE
                   SANDSTONE = 14, CACTUS = 15, PINE_LOG = 16, PINE_LEAVES = 17, TALL_GRASS = 18,
                   FLOWER = 19, COAL_ORE = 20, COPPER_ORE = 21, TIN_ORE = 22, IRON_ORE = 23,
                   SILVER_ORE = 24, QUARTZ = 25, TORCH = 26, LANTERN = 27, GLOWCAP = 28,
-                  WORKBENCH = 29, KILN = 30, CRATE = 31, GLASS = 32, COUNT = 33;
+                  WORKBENCH = 29, KILN = 30, CRATE = 31, GLASS = 32, BEDROLL = 33, GRAVE_CAIRN = 34,
+                  COUNT = 35;
 }
 
 enum Face : uint8_t { PX, NX, PY, NY, PZ, NZ };
@@ -68,6 +69,10 @@ enum Tile : uint8_t {
     T_CRACK_1,
     T_CRACK_2,
     T_CRACK_3,
+    T_BEDROLL_TOP,  // M5
+    T_BEDROLL_SIDE,
+    T_CAIRN_TOP,
+    T_CAIRN_SIDE,
     T_COUNT
 };
 

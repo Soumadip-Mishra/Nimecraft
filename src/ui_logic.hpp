@@ -38,7 +38,13 @@ struct DoubleTap {
     bool press(double now);
 };
 
-// Every item the Creative palette offers: block items except AIR and WATER, then STICK..END-1.
+// One icon of a 10-icon survival bar (health, hunger, air, armor) showing a 0..20 value in half
+// steps: icon i is Full at value >= 2i + 2, Half at value > 2i, else Empty (NaN: Empty).
+enum class IconFill : uint8_t { Empty, Half, Full };
+IconFill icon_fill(float value, int i);
+
+// Every item the Creative palette offers: block items except AIR, WATER, and GRAVE_CAIRN (made
+// only by dying), then STICK..END-1.
 std::vector<ItemId> creative_palette();
 
 // A grid of `cols` x `rows` square slots of `size` px with `gap` px between them, row-major from

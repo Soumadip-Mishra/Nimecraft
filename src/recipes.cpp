@@ -40,6 +40,7 @@ std::vector<Recipe> build() {
     }
     add({s(itm::SILVER_INGOT, 2), s(itm::QUARTZ_SHARD, 1), s(itm::STICK, 1)}, s(itm::SWORD_SILVER, 1), Workbench);
     add({s(itm::IRON_INGOT, 1), s(blk::TORCH, 1), s(blk::GLASS, 1)}, s(blk::LANTERN, 1), Workbench);
+    add({s(itm::WOOL, 3), s(blk::PLANKS, 3)}, s(blk::BEDROLL, 1), Workbench);  // M5
     const int armor_cost[] = {5, 8, 7, 4};  // helmet, chest, legs, boots
     for (int k = 0; k < 4; ++k) {
         const auto piece = static_cast<ItemId>(k);

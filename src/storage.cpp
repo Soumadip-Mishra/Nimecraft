@@ -343,6 +343,63 @@ std::optional<float> parse_float(std::string_view s) {
 
 constexpr double DEFAULT_TIME = 6000;
 
+// Splits s at commas into exactly n fields; nullopt for any other count.
+template <std::size_t N>
+std::optional<std::array<std::string_view, N>> split_fields(std::string_view s) {
+    std::array<std::string_view, N> out{};
+    for (std::size_t i = 0; i < N; ++i) {
+        const std::size_t comma = s.find(',');
+        if ((comma == std::string_view::npos) != (i == N - 1)) return std::nullopt;
+        out[i] = s.substr(0, comma);
+        if (comma != std::string_view::npos) s.remove_prefix(comma + 1);
+    }
+    return out;
+}
+
+// `vitals` (M5): health, hunger, saturation, air, exhaustion, regen_timer, starve_timer. Any
+// field that is not a finite number, or a wrong field count, gives full vitals; values are clamped.
+Vitals parse_vitals(std::string_view s) {
+    const auto fields = split_fields<7>(s);
+    if (!fields) return Vitals{};
+    std::array<float, 7> f{};
+    for (std::size_t i = 0; i < f.size(); ++i) {
+        const std::optional<float> v = parse_float((*fields)[i]);
+        if (!v) return Vitals{};
+        f[i] = *v;
+    }
+    Vitals v;
+    v.health = std::clamp(f[0], 0.f, MAX_HEALTH);
+    v.hunger = std::clamp(f[1], 0.f, MAX_HUNGER);
+    v.saturation = std::clamp(f[2], 0.f, v.hunger);
+    v.air = std::clamp(f[3], 0.f, MAX_AIR);
+    // Below 4 after a drain, plus up to 6 from regeneration before the next tick drains it.
+    v.exhaustion = std::clamp(f[4], 0.f, 10.f);
+    v.regen_timer = std::clamp(f[5], 0.f, 4.f);
+    v.starve_timer = std::clamp(f[6], 0.f, 4.f);
+    return v;
+}
+
+std::string vitals_text(const Vitals& v) {
+    const float f[7] = {v.health, v.hunger, v.saturation, v.air, v.exhaustion, v.regen_timer, v.starve_timer};
+    std::string out;
+    for (int i = 0; i < 7; ++i) out += (i > 0 ? "," : "") + number_text(f[i]);
+    return out;
+}
+
+// `spawn` (M5): the bedroll cell x,y,z as integers, y in 0..255; anything else is no bedroll.
+std::optional<BlockPos> parse_spawn(std::string_view s) {
+    const auto fields = split_fields<3>(s);
+    if (!fields) return std::nullopt;
+    std::array<int, 3> c{};
+    for (std::size_t i = 0; i < c.size(); ++i) {
+        const std::string_view t = (*fields)[i];
+        const auto res = std::from_chars(t.data(), t.data() + t.size(), c[i]);
+        if (t.empty() || res.ec != std::errc{} || res.ptr != t.data() + t.size()) return std::nullopt;
+    }
+    if (c[1] < 0 || c[1] >= WORLD_HEIGHT) return std::nullopt;
+    return BlockPos{c[0], c[1], c[2]};
+}
+
 }  // namespace
 
 RegionStore::RegionStore(fs::path dir) : dir_(std::move(dir)) {
@@ -454,13 +511,16 @@ void parse_stack_list(std::string_view v, std::span<ItemStack> slots, bool armor
 }  // namespace
 
 bool save_meta(const fs::path& file, const WorldMeta& m) {
-    const std::string text = "version=1\nseed=" + number_text(m.seed) + "\npx=" + number_text(m.px) +
-                             "\npy=" + number_text(m.py) + "\npz=" + number_text(m.pz) +
-                             "\nyaw=" + number_text(m.yaw) + "\npitch=" + number_text(m.pitch) +
-                             "\ntime=" + number_text(m.time) +
-                             "\nmode=" + (m.mode == GameMode::Creative ? "creative" : "survival") +
-                             "\ninv=" + stack_list(m.inv.slots) + "\narmor=" + stack_list(m.inv.armor) +
-                             "\nsel=" + number_text(m.inv.selected) + "\n";
+    std::string text = "version=1\nseed=" + number_text(m.seed) + "\npx=" + number_text(m.px) +
+                       "\npy=" + number_text(m.py) + "\npz=" + number_text(m.pz) +
+                       "\nyaw=" + number_text(m.yaw) + "\npitch=" + number_text(m.pitch) +
+                       "\ntime=" + number_text(m.time) +
+                       "\nmode=" + (m.mode == GameMode::Creative ? "creative" : "survival") +
+                       "\ninv=" + stack_list(m.inv.slots) + "\narmor=" + stack_list(m.inv.armor) +
+                       "\nsel=" + number_text(m.inv.selected) + "\nvitals=" + vitals_text(m.vitals) + "\n";
+    if (m.spawn)
+        text += "spawn=" + number_text(m.spawn->x) + "," + number_text(m.spawn->y) + "," + number_text(m.spawn->z) +
+                "\n";
     return write_file_atomic(file, std::vector<uint8_t>(text.begin(), text.end()));
 }
 
@@ -474,6 +534,8 @@ std::optional<WorldMeta> load_meta(const fs::path& file) {
     double time = DEFAULT_TIME;
     GameMode mode = GameMode::Survival;
     Inventory inv;
+    Vitals vitals;
+    std::optional<BlockPos> spawn;
     // Skip a UTF-8 byte order mark, which some Windows editors add when saving.
     std::size_t start = text.starts_with("\xEF\xBB\xBF") ? 3 : 0;
     while (start < text.size()) {
@@ -506,6 +568,10 @@ std::optional<WorldMeta> load_meta(const fs::path& file) {
         } else if (key == "sel") {
             const std::optional<uint32_t> sel = parse_u32(value);
             inv.selected = sel && *sel <= 8 ? static_cast<int>(*sel) : 0;
+        } else if (key == "vitals") {
+            vitals = parse_vitals(value);
+        } else if (key == "spawn") {
+            spawn = parse_spawn(value);
         }  // unknown keys are ignored
     }
     if (version != 1u || !seed || !px || !py || !pz || !yaw || !pitch) return std::nullopt;
@@ -513,5 +579,7 @@ std::optional<WorldMeta> load_meta(const fs::path& file) {
     m.time = time;
     m.mode = mode;
     m.inv = inv;
+    m.vitals = vitals;
+    m.spawn = spawn;
     return m;
 }

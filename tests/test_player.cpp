@@ -216,6 +216,25 @@ TEST(test_player_walk_directions) {
     CHECK_NEAR(b.pos.z, 4.8, 0.01);
 }
 
+TEST(test_player_sprint_speed) {
+    World w = flat_world();
+    PlayerInput in;
+    in.forward = 1.f;
+    in.sprint = true;
+    Player a = at(0.5f, 70.f, 0.5f);
+    run(a, w, in, 60);  // 1 s at 4.3 * 1.3 = 5.59 blocks/s
+    CHECK_NEAR(a.pos.x, 6.09, 0.01);
+    // Sprinting does not speed up swimming or flying.
+    World pool = pool_world(59, 69);
+    Player s = at(0.5f, 60.f, 0.5f);
+    run(s, pool, in, 60);
+    CHECK_NEAR(s.pos.x, 0.5 + 4.3 * 0.6, 0.01);
+    Player f = at(0.5f, 80.f, 0.5f);
+    f.flying = true;
+    run(f, w, in, 60);
+    CHECK_NEAR(f.pos.x, 10.5, 0.01);
+}
+
 TEST(test_player_diagonal_normalized) {
     World w = flat_world();
     PlayerInput in;

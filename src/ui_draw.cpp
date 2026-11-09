@@ -2,6 +2,7 @@
 
 #include "block.hpp"
 #include "render.hpp"
+#include "ui_logic.hpp"
 
 #include <algorithm>
 #include <string>
@@ -58,7 +59,7 @@ void draw_tooltip(const std::string& text, Vector2 at) {
 }
 
 void draw_hotbar(const UiTextures& t, const Inventory& inv) {
-    constexpr float SLOT = 52.f, GAP = 4.f;
+    constexpr float SLOT = 52.f, GAP = 4.f;  // HOTBAR_SLOT and HOTBAR_GAP below must match
     const float total = 9 * SLOT + 8 * GAP;
     const float x0 = (static_cast<float>(GetScreenWidth()) - total) / 2, y0 = static_cast<float>(GetScreenHeight()) - SLOT - 10;
     for (int i = 0; i < 9; ++i) {
@@ -80,4 +81,98 @@ std::string item_label(const ItemStack& s) {
     std::string out(d.name);
     if (d.durability > 0) out += " (" + std::to_string(d.durability - s.damage) + "/" + std::to_string(d.durability) + ")";
     return out;
+}
+
+// ---- Survival HUD (M5 Task 4) ----
+
+namespace {
+
+constexpr float HUD_PX = 2.f;  // screen pixels per icon pixel
+constexpr int ICON = 9;        // icon art is 9 x 9
+constexpr float ICON_STEP = ICON * HUD_PX + 2.f;
+constexpr float HOTBAR_SLOT = 52.f, HOTBAR_GAP = 4.f, HOTBAR_BOTTOM = 10.f;
+
+// Icon art: '#' body, '+' highlight, '.' empty.
+constexpr const char* HEART[ICON] = {".##...##.", "#+##.####", "#+#######", "#########", ".#######.",
+                                     "..#####..", "...###...", "....#....", "........."};
+constexpr const char* DRUMSTICK[ICON] = {"....####.", "...#+####", "...######", "...######", "....####.",
+                                         "...##....", "..##.....", ".##......", "##......."};
+constexpr const char* BUBBLE[ICON] = {".........", "...###...", "..#+..#..", ".#+....#.", ".#.....#.",
+                                      ".#.....#.", "..#...#..", "...###...", "........."};
+constexpr const char* SHIELD[ICON] = {"#########", "#+#######", "#+#######", "#########", "#########",
+                                      ".#######.", ".#######.", "..#####..", "...###..."};
+
+// One icon at (x, y). Full: body color; Half: the left half in color, the rest dark; Empty: dark.
+void draw_icon(const char* const* art, float x, float y, IconFill fill, Color body) {
+    const Color dark{30, 24, 24, 200}, light{255, 255, 255, 220};
+    for (int r = 0; r < ICON; ++r)
+        for (int c = 0; c < ICON && art[r][c] != '\0'; ++c) {
+            const char p = art[r][c];
+            if (p == '.') continue;
+            const bool lit = fill == IconFill::Full || (fill == IconFill::Half && c < ICON / 2 + 1);
+            const Color col = !lit ? dark : (p == '+' ? light : body);
+            DrawRectangleRec(Rectangle{x + c * HUD_PX, y + r * HUD_PX, HUD_PX, HUD_PX}, col);
+        }
+}
+
+// 10 icons for a 0..20 value, left to right from x (or right to left when mirrored).
+void draw_icon_row(const char* const* art, float x, float y, float value, Color body, bool from_right) {
+    for (int i = 0; i < 10; ++i) {
+        const float ix = from_right ? x - (i + 1) * ICON_STEP : x + i * ICON_STEP;
+        draw_icon(art, ix, y, icon_fill(value, i), body);
+    }
+}
+
+float hotbar_left() {
+    return (static_cast<float>(GetScreenWidth()) - (9 * HOTBAR_SLOT + 8 * HOTBAR_GAP)) / 2;
+}
+
+float hotbar_top() {
+    return static_cast<float>(GetScreenHeight()) - HOTBAR_SLOT - HOTBAR_BOTTOM;
+}
+
+}  // namespace
+
+void draw_survival_hud(const Vitals& v, int armor, bool show_air) {
+    const float left = hotbar_left(), right = left + 9 * HOTBAR_SLOT + 8 * HOTBAR_GAP;
+    const float row1 = hotbar_top() - 46.f - ICON * HUD_PX, row2 = row1 - ICON_STEP;
+    draw_icon_row(HEART, left, row1, v.health, Color{214, 40, 48, 255}, false);
+    draw_icon_row(DRUMSTICK, right, row1, v.hunger, Color{196, 128, 70, 255}, true);
+    if (armor > 0) draw_icon_row(SHIELD, left, row2, static_cast<float>(armor), Color{196, 200, 210, 255}, false);
+    if (show_air) draw_icon_row(BUBBLE, right, row2, v.air * 2.f, Color{120, 190, 255, 255}, true);
+}
+
+void draw_hurt_flash(float strength) {
+    const float a = std::clamp(strength, 0.f, 1.f);
+    if (a <= 0.f) return;
+    DrawRectangle(0, 0, GetScreenWidth(), GetScreenHeight(), Color{200, 0, 0, static_cast<unsigned char>(a * 110.f)});
+}
+
+Rectangle death_button_rect() {
+    constexpr float W = 220.f, H = 44.f;
+    return Rectangle{(static_cast<float>(GetScreenWidth()) - W) / 2, static_cast<float>(GetScreenHeight()) / 2 + 10, W, H};
+}
+
+void draw_death_screen(const std::string& note, bool hovered) {
+    DrawRectangle(0, 0, GetScreenWidth(), GetScreenHeight(), Color{90, 0, 0, 150});
+    const char* title = "You died";
+    DrawText(title, (GetScreenWidth() - MeasureText(title, 48)) / 2, GetScreenHeight() / 2 - 80, 48, WHITE);
+    if (!note.empty())
+        DrawText(note.c_str(), (GetScreenWidth() - MeasureText(note.c_str(), 18)) / 2, GetScreenHeight() / 2 - 26, 18,
+                 LIGHTGRAY);
+    const Rectangle b = death_button_rect();
+    DrawRectangleRec(b, hovered ? Color{110, 110, 130, 240} : Color{60, 60, 74, 240});
+    DrawRectangleLinesEx(b, 2.f, WHITE);
+    const char* label = "Respawn";
+    DrawText(label, static_cast<int>(b.x + (b.width - static_cast<float>(MeasureText(label, 24))) / 2),
+             static_cast<int>(b.y) + 10, 24, WHITE);
+}
+
+void draw_toast(const std::string& text) {
+    if (text.empty()) return;
+    constexpr int SIZE = 20;
+    const int w = MeasureText(text.c_str(), SIZE);
+    const int y = static_cast<int>(hotbar_top()) - 110;
+    DrawRectangle((GetScreenWidth() - w) / 2 - 8, y - 4, w + 16, SIZE + 8, Color{0, 0, 0, 150});
+    DrawText(text.c_str(), (GetScreenWidth() - w) / 2, y, SIZE, WHITE);
 }

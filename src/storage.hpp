@@ -8,7 +8,7 @@
 //   (0 kiln, 1 crate, 2 cairn), payload (see storage.cpp). Version 2 is written; versions 1 and 2
 //   load (v1 columns have no block entities).
 // world.meta: "key=value" lines: version=1, seed, px, py, pz, yaw, pitch, then the optional keys
-// added later (time, M3; mode, inv, armor, sel, M4). Unknown keys are ignored; non-finite floats or missing required keys
+// added later (time, M3; mode, inv, armor, sel, M4; vitals, spawn, M5). Unknown keys are ignored; non-finite floats or missing required keys
 // make the file invalid.
 #pragma once
 
@@ -16,6 +16,7 @@
 #include "coords.hpp"
 #include "inventory.hpp"
 #include "player.hpp"
+#include "vitals.hpp"
 
 #include <cstdint>
 #include <filesystem>
@@ -67,6 +68,13 @@ struct WorldMeta {
     // wrong slot) loads as an empty slot; missing entries are empty; a bad sel loads as 0.
     GameMode mode = GameMode::Survival;
     Inventory inv{};
+    // Keys added in M5 Task 3, each optional: `vitals` health,hunger,saturation,air,exhaustion,
+    // regen_timer,starve_timer (missing, a wrong field count, or any non-finite or unparsable
+    // field: full vitals; values clamped to their ranges: health, hunger 0..20, saturation 0..hunger,
+    // air 0..10, exhaustion 0..10 (regeneration's +6 waits a tick to drain), timers 0..4); `spawn`
+    // the bedroll cell x,y,z (written only when set; missing or invalid: none, the world spawn).
+    Vitals vitals{};
+    std::optional<BlockPos> spawn{};
 };
 
 bool save_meta(const std::filesystem::path& file, const WorldMeta& m);

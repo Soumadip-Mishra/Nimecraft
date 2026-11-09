@@ -46,6 +46,8 @@ constexpr std::array<BlockDef, blk::COUNT> BASE{{
     {"Kiln", true, true, true, top_bottom_side(T_KILN_TOP, T_KILN_TOP, T_KILN_SIDE)},
     {"Crate", true, true, true, top_bottom_side(T_CRATE_TOP, T_CRATE_TOP, T_CRATE_SIDE)},
     {"Glass", true, false, true, all(T_GLASS), Layer::Translucent, Shape::Cube, 0, 0},
+    {"Bedroll", true, true, true, top_bottom_side(T_BEDROLL_TOP, T_PLANKS, T_BEDROLL_SIDE)},
+    {"Grave Cairn", true, true, true, top_bottom_side(T_CAIRN_TOP, T_CAIRN_TOP, T_CAIRN_SIDE)},
 }};
 
 // Hardness, tool, min tier, and drops (M4 Task 3). Blocks the task's table leaves out use the
@@ -87,6 +89,8 @@ constexpr std::array<BlockDef, blk::COUNT> with_mining(std::array<BlockDef, blk:
     mine(blk::CACTUS, 0.4f, None, 0);
     mine(blk::LANTERN, 1.5f, Pick, 1);
     for (BlockId id : {blk::TALL_GRASS, blk::FLOWER, blk::TORCH, blk::GLOWCAP}) mine(id, 0.f, None, 0);
+    mine(blk::BEDROLL, 0.4f, None, 0);      // M5
+    mine(blk::GRAVE_CAIRN, 0.5f, None, 0);  // M5: by hand, so its items always drop
 
     drop(blk::GRASS, blk::DIRT, 1, 1);
     drop(blk::COAL_ORE, itm::COAL, 1, 1);
@@ -96,6 +100,7 @@ constexpr std::array<BlockDef, blk::COUNT> with_mining(std::array<BlockDef, blk:
     drop(blk::TALL_GRASS, itm::FIBER, 1, 1, 10);
     drop(blk::GLASS, 0, 0, 0);
     drop(blk::ICE, 0, 0, 0);
+    drop(blk::GRAVE_CAIRN, 0, 0, 0);  // its stored items drop instead (block_entity_contents)
     return d;
 }
 

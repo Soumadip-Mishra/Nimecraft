@@ -95,10 +95,17 @@ bool DoubleTap::press(double now) {
     return false;
 }
 
+IconFill icon_fill(float value, int i) {
+    const float lo = 2.f * static_cast<float>(i);
+    if (value >= lo + 2.f) return IconFill::Full;
+    if (value > lo) return IconFill::Half;
+    return IconFill::Empty;
+}
+
 std::vector<ItemId> creative_palette() {
     std::vector<ItemId> out;
     for (BlockId b = 1; b < blk::COUNT; ++b)
-        if (b != blk::WATER) out.push_back(b);
+        if (b != blk::WATER && b != blk::GRAVE_CAIRN) out.push_back(b);
     for (ItemId id = itm::STICK; id < itm::END; ++id) out.push_back(id);
     return out;
 }

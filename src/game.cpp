@@ -4,6 +4,7 @@
 #include "block_entities.hpp"
 #include "chunk.hpp"
 #include "coords.hpp"
+#include "death.hpp"
 #include "mining.hpp"
 #include "platform.hpp"
 #include "recipes.hpp"
@@ -21,6 +22,7 @@
 #include <span>
 #include <string>
 #include <thread>
+#include <utility>
 #include <variant>
 
 namespace {
@@ -36,6 +38,13 @@ constexpr float ITEM_DRAW_SIZE = 0.3f;
 constexpr float RECIPE_ROW = 30.f, SIDE_W = 330.f;
 constexpr int RECIPE_ROWS = 10, PALETTE_COLS = 7, PALETTE_ROWS = 7;
 constexpr float SCREEN_REACH = 8.f;  // a kiln or crate screen closes beyond this distance
+constexpr float HURT_FLASH_S = 0.35f, TOAST_S = 3.f;
+constexpr int SMOKE_DEATH_FROM = 440, SMOKE_DEATH_TO = 460;  // --smoke draws the death screen
+const ColumnPos ORIGIN_COLUMN{0, 0};                        // spawn_player's column
+
+Vector3 on_top_of(BlockPos b) {
+    return Vector3{static_cast<float>(b.x) + 0.5f, static_cast<float>(b.y + 1), static_cast<float>(b.z) + 0.5f};
+}
 
 ColumnPos column_at(Vector3 pos) {
     return column_of(chunk_of(static_cast<int>(std::floor(pos.x)), 0,
@@ -88,6 +97,7 @@ PlayerInput read_input(bool captured) {
     in.right = static_cast<float>(IsKeyDown(KEY_D)) - static_cast<float>(IsKeyDown(KEY_A));
     in.jump = IsKeyDown(KEY_SPACE);
     in.descend = IsKeyDown(KEY_LEFT_SHIFT);
+    in.sprint = (IsKeyDown(KEY_LEFT_CONTROL) || IsKeyDown(KEY_RIGHT_CONTROL)) && in.forward > 0.f;
     return in;
 }
 
@@ -176,6 +186,10 @@ Game::Game(const CliOptions& o)
         spawn_col_ = column_at(player_.pos);
         mode_ = meta_->mode;  // a saved world keeps its mode
         inv_ = meta_->inv;
+        vitals_ = meta_->vitals;
+        bedroll_ = meta_->spawn;
+        last_health_ = vitals_.health;
+        dead_ = mode_ == GameMode::Survival && vitals_.health <= 0.f;  // quit on the death screen
     }
 
     // --smoke paces itself at 60 FPS instead of vsync: a compositor throttles a vsynced window it
@@ -191,7 +205,7 @@ Game::Game(const CliOptions& o)
     SetExitKey(KEY_NULL);
     renderer_.init();
 
-    captured_ = !o.smoke;
+    captured_ = !o.smoke && !dead_;
     if (captured_) DisableCursor();
     start_ = GetTime();
 }
@@ -208,6 +222,16 @@ UiTextures Game::textures() const {
 
 void Game::handle_input(float dt) {
     swallow_click_ = false;
+    toast_left_ = std::max(0.f, toast_left_ - dt);
+    hurt_flash_ = std::max(0.f, hurt_flash_ - dt);
+    if (dead_ || respawning_) {  // no play input; the world keeps its time
+        if (IsKeyPressed(KEY_F3)) debug_ = !debug_;
+        if (dead_ && spawned_ && IsMouseButtonPressed(MOUSE_BUTTON_LEFT) &&
+            CheckCollisionPointRec(GetMousePosition(), death_button_rect()))
+            start_respawn();
+        if (spawned_) time_.advance(dt);
+        return;
+    }
     if (!opts_.smoke) {
         if (screen_ != Screen::None) {
             if (IsKeyPressed(KEY_ESCAPE) || IsKeyPressed(KEY_E)) close_screen();
@@ -246,10 +270,120 @@ void Game::handle_input(float dt) {
         in.forward = 1.f;
         in.jump = true;  // hop up 1-block steps so the walk keeps streaming new terrain
     }
+    // Sprinting needs food, and does nothing in water (so it costs nothing there either).
+    if ((mode_ == GameMode::Survival && !can_sprint(vitals_)) || (spawned_ && in_water(player_, world_)))
+        in.sprint = false;
     if (spawned_) {
+        const Vector3 before = player_.pos;
+        const bool was_on_ground = player_.on_ground;
         player_update(player_, world_, in, dt);
         time_.advance(dt);
+        update_survival(in, before, was_on_ground, dt);
     }
+}
+
+void Game::update_survival(const PlayerInput& in, Vector3 before, bool was_on_ground, float dt) {
+    const bool survival = mode_ == GameMode::Survival;
+    VitalsInput vin;
+    if (!player_.flying) {
+        const float dx = player_.pos.x - before.x, dz = player_.pos.z - before.z;
+        const float moved = std::sqrt(dx * dx + dz * dz);
+        (in.sprint ? vin.sprinted_m : vin.walked_m) = moved;
+    }
+    vin.jumps = (in.jump && was_on_ground && !player_.on_ground && player_.vel.y > 0.f) ? 1 : 0;
+    vin.blocks_mined = mined_since_tick_;
+    vin.eye_in_water = eye_in_water(player_, world_);
+    mined_since_tick_ = 0;
+    vitals_tick(vitals_, vin, dt, mode_);
+    damage_tick(damage_, dt);
+
+    const bool wet = in_water(player_, world_);
+    const float fell = track_fall(fall_, player_.pos.y, player_.on_ground, wet || player_.flying || !survival);
+    if (survival && fell > 0.f) take_damage(vitals_, damage_, fall_damage(fell, wet), armor_points(inv_));
+
+    if (vitals_.health < last_health_) hurt_flash_ = HURT_FLASH_S;
+    last_health_ = vitals_.health;
+    if (survival && vitals_.health <= 0.f) die();
+}
+
+void Game::die() {
+    close_screen();  // a stack on the cursor goes back into the inventory first
+    dead_ = true;
+    mining_ = false;
+    mine_progress_ = 0.f;
+    eating_ = EatState{};
+    player_.vel = Vector3{};
+    const bool had_items = std::any_of(inv_.slots.begin(), inv_.slots.end(), [](const ItemStack& s) { return !s.empty(); }) ||
+                           std::any_of(inv_.armor.begin(), inv_.armor.end(), [](const ItemStack& s) { return !s.empty(); });
+    death_note_.clear();
+    if (const std::optional<BlockPos> spot = find_cairn_spot(world_, player_.pos); spot && had_items) {
+        // A plant or torch in the cell is replaced by the cairn: it drops like a broken block.
+        const BlockId replaced = world_.get(spot->x, spot->y, spot->z);
+        const Vector3 at{spot->x + 0.5f, spot->y + 0.25f, spot->z + 0.5f};
+        if (replaced != blk::AIR)
+            if (const std::optional<ItemStack> d = block_drop(replaced, ItemStack{}, drop_rng_++ * 0x9E3779B9u))
+                items_.spawn(at, *d);
+        place_cairn(world_, *spot, inv_);
+        if (world_.get(spot->x, spot->y, spot->z) == blk::GRAVE_CAIRN)
+            death_note_ = "Your items wait in a grave cairn where you fell.";
+        mgr_.flush_edits();
+    }
+    if (had_items && death_note_.empty()) death_note_ = "No room for a cairn: your items fell to the ground.";
+    // No spot (or a cell that could not be set): everything drops at the feet instead.
+    for (ItemStack& s : inv_.slots)
+        if (!s.empty()) items_.spawn(player_.pos, std::exchange(s, ItemStack{}));
+    for (ItemStack& s : inv_.armor)
+        if (!s.empty()) items_.spawn(player_.pos, std::exchange(s, ItemStack{}));
+    if (!opts_.smoke) {
+        EnableCursor();
+        captured_ = false;
+    }
+}
+
+// The player stays dead where they fell (health 0, so a save made now reloads on the death screen)
+// until the respawn column has loaded; only streaming moves to it.
+void Game::start_respawn() {
+    dead_ = false;
+    respawning_ = true;
+    respawn_to_origin_ = !bedroll_;
+    respawn_col_ = bedroll_ ? column_at(on_top_of(*bedroll_)) : ORIGIN_COLUMN;
+    if (!opts_.smoke) {
+        DisableCursor();
+        captured_ = true;
+    }
+}
+
+void Game::update_respawn() {
+    if (!respawning_ || !mgr_.column_ready(respawn_col_)) return;
+    if (!respawn_to_origin_ && !bedroll_usable(world_, *bedroll_)) {
+        respawn_to_origin_ = true;
+        respawn_col_ = ORIGIN_COLUMN;
+        toast("Your bedroll is missing or blocked");
+        return;
+    }
+    player_.pos = respawn_point(world_, respawn_to_origin_ ? std::nullopt : bedroll_);
+    player_.vel = Vector3{};
+    player_.flying = false;
+    vitals_ = Vitals{};
+    last_health_ = vitals_.health;
+    damage_ = DamageState{};
+    hurt_flash_ = 0.f;
+    fall_ = FallTracker{};
+    respawning_ = false;
+}
+
+void Game::toast(const char* text) {
+    toast_ = text;
+    toast_left_ = TOAST_S;
+}
+
+void Game::update_eating(float dt) {
+    ItemStack& held = inv_.held();
+    const bool use = mode_ == GameMode::Survival && spawned_ && captured_ && !swallow_click_ &&
+                     screen_ == Screen::None && IsMouseButtonDown(MOUSE_BUTTON_RIGHT) && !held.empty();
+    if (!eat_tick(eating_, use, held.id, vitals_, dt)) return;
+    eat(vitals_, item_def(held.id));
+    if (--held.count == 0) held = ItemStack{};
 }
 
 void Game::drop_stack(ItemStack s, Vector3 from) {
@@ -298,6 +432,7 @@ void Game::update_mining(const RayHit& hit, float dt) {
     mine_progress_ += dt;
     if (mine_progress_ >= break_time(world_.get(p.x, p.y, p.z), inv_.held())) {
         break_block(p, true);
+        ++mined_since_tick_;
         break_cooldown_ = BREAK_COOLDOWN;
     }
 }
@@ -316,6 +451,16 @@ void Game::use_block(const RayHit& hit) {
         }
         if (b == blk::WORKBENCH) {
             open_screen(Screen::Inventory);
+            return;
+        }
+        if (b == blk::BEDROLL) {  // sets the respawn point; at night, also sleeps until dawn
+            bedroll_ = target;
+            if (can_sleep(time_, false)) {  // M6 supplies whether hostiles are within 8 blocks
+                sleep_until_dawn(time_);
+                toast("You slept until dawn - respawn point set");
+            } else {
+                toast("Respawn point set - you can sleep only at night");
+            }
             return;
         }
     }
@@ -583,12 +728,21 @@ void Game::draw(const RayHit& hit) {
             }
         }
         EndMode3D();
-        if (eye_in_water(player_, world_)) DrawRectangle(0, 0, GetScreenWidth(), GetScreenHeight(), UNDERWATER);
-        draw_crosshair();
+        const bool eye_wet = eye_in_water(player_, world_);
+        if (eye_wet) DrawRectangle(0, 0, GetScreenWidth(), GetScreenHeight(), UNDERWATER);
+        draw_hurt_flash(hurt_flash_ / HURT_FLASH_S);
+        if (!dead_) draw_crosshair();
         draw_hotbar(textures(), inv_);
+        if (mode_ == GameMode::Survival)
+            draw_survival_hud(vitals_, armor_points(inv_), eye_wet || vitals_.air < MAX_AIR);
         if (mode_ == GameMode::Creative)
             DrawText(player_.flying ? "Creative - flying" : "Creative", GetScreenWidth() - 190, 12, 18, WHITE);
+        if (toast_left_ > 0.f) draw_toast(toast_);
         if (screen_ != Screen::None) draw_screen(slots);
+        const bool smoke_death = opts_.smoke && smoke_frames_ >= SMOKE_DEATH_FROM && smoke_frames_ < SMOKE_DEATH_TO;
+        if (dead_ || smoke_death)
+            draw_death_screen(death_note_, CheckCollisionPointRec(GetMousePosition(), death_button_rect()));
+        if (respawning_) draw_centered_text("Respawning...", GetScreenHeight() / 2 - 15, 30, WHITE);
         if (debug_) draw_debug(player_, world_, mgr_, drawn_, time_, items_.all().size());
     } else {
         draw_centered_text("Generating world...", GetScreenHeight() / 2 - 15, 30, WHITE);
@@ -615,19 +769,24 @@ bool Game::frame() {
     const float dt = GetFrameTime();
     handle_input(dt);
 
-    mgr_.update(spawned_ ? column_at(player_.pos) : spawn_col_);
+    mgr_.update(!spawned_ ? spawn_col_ : (respawning_ ? respawn_col_ : column_at(player_.pos)));
     if (!spawned_ && mgr_.column_ready(spawn_col_)) {
         if (!meta_) player_ = spawn_player(world_);
         spawned_ = true;
     }
+    update_respawn();
 
     RayHit hit{};
     if (spawned_) {
-        hit = raycast_voxel(world_, player_eye(player_), player_look(player_), REACH);
-        update_mining(hit, dt);
-        use_block(hit);
+        const bool alive = !dead_ && !respawning_;
+        if (alive) {
+            hit = raycast_voxel(world_, player_eye(player_), player_look(player_), REACH);
+            update_mining(hit, dt);
+            use_block(hit);
+            update_eating(dt);
+        }
         items_.update(world_, dt);
-        items_.collect(player_.pos, inv_);
+        if (alive) items_.collect(player_.pos, inv_);
         tick_kilns(dt);
         if (screen_ == Screen::Kiln || screen_ == Screen::Crate) {
             const Vector3 c{open_pos_.x + 0.5f, open_pos_.y + 0.5f, open_pos_.z + 0.5f};
@@ -658,6 +817,8 @@ bool Game::save() {
     if (meta_) {
         meta_->mode = mode_;
         meta_->inv = inv_;
+        meta_->vitals = vitals_;
+        meta_->spawn = bedroll_;
     }
     for (ColumnPos c : world_.loaded_columns())
         if (column_modified(world_, c)) store_->save_column(c, copy_column(world_, c));

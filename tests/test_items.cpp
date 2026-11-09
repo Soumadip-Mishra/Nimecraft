@@ -39,7 +39,10 @@ TEST(test_item_ids_pinned) {
     CHECK(blk::KILN == 30);
     CHECK(blk::CRATE == 31);
     CHECK(blk::GLASS == 32);
-    CHECK(blk::COUNT == 33);
+    // M5 README.
+    CHECK(blk::BEDROLL == 33);
+    CHECK(blk::GRAVE_CAIRN == 34);
+    CHECK(blk::COUNT == 35);
 }
 
 TEST(test_item_defs_table) {

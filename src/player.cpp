@@ -69,7 +69,8 @@ void player_update(Player& p, const World& w, const PlayerInput& in, float dt) {
         wz /= len;
     }
     const bool wet = !p.flying && in_water(p, w);
-    const float speed = p.flying ? FLY_SPEED : (wet ? PLAYER_SPEED * WATER_SPEED : PLAYER_SPEED);
+    const float land = in.sprint ? PLAYER_SPEED * SPRINT_MUL : PLAYER_SPEED;
+    const float speed = p.flying ? FLY_SPEED : (wet ? PLAYER_SPEED * WATER_SPEED : land);
     p.vel.x = wx * speed;
     p.vel.z = wz * speed;
     if (in.jump && p.on_ground && !wet && !p.flying) {
